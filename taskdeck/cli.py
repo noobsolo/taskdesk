@@ -12,6 +12,7 @@ import sys
 from . import __version__
 from .core import DeckError, Project, git
 from .service import ensure_service, online, rpc, snapshot, view
+from .importer import import_markdown
 
 
 def emit(value):
@@ -33,6 +34,9 @@ def parser():
     ls = sub.add_parser("list", help="查看任务与依赖状态")
     ls.add_argument("--json", action="store_true")
     sub.add_parser("check", help="检查 ID、依赖、循环依赖和本机环境")
+    imp = sub.add_parser("import", help="把现有 Txxx-*.md 导入任务文件夹，不启动任务")
+    imp.add_argument("source", nargs="?", help="任务文档目录；默认识别 docs/tasks")
+    imp.add_argument("--dry-run", action="store_true")
     for name, help_text in [("show", "任务详情"), ("edit", "用 EDITOR 编辑任务说明"),
                             ("start", "手动开始/继续任务"), ("chat", "进入同一个 Codex 对话"),
                             ("stop", "请求中断当前轮次"), ("diff", "查看分支和未提交修改")]:
@@ -70,6 +74,8 @@ def main(argv=None):
         elif args.command == "add":
             task = project.add(args.id, args.title, [x.strip() for x in args.depends.split(",") if x.strip()])
             print(f"已创建：{task.folder}\n编辑 task.yaml 和 description.md 后，手动开始。")
+        elif args.command == "import":
+            emit(import_markdown(project, args.source, args.dry_run))
         elif args.command == "list":
             data = snapshot(project)
             if args.json:

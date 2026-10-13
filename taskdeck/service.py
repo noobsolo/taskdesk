@@ -207,6 +207,8 @@ class Service:
             return task.state
         if task.state.get("completed_commit") and self.project.has_commit(task.state["completed_commit"]):
             raise DeckError("任务已交付到基线")
+        if task.definition.get("source_status") == "已完成":
+            raise DeckError("原文档标记已完成，请先点击「确认完成」核对交付提交；如需重做，先修改 task.yaml 的 source_status。")
         task.save(status="preparing", error=None)
         try:
             await asyncio.to_thread(self.project.sync_base)

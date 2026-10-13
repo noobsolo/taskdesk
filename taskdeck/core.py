@@ -96,6 +96,7 @@ LABELS = {"ready": "可开始", "blocked": "被阻塞", "preparing": "准备中"
           "running": "开发中", "waiting": "等你处理", "idle": "等你继续",
           "interrupted": "已中断", "disconnected": "需恢复", "failed": "失败",
           "done": "已入基线"}
+LABELS["unverified"] = "待核对"
 ACTIVE = {"preparing", "running", "waiting"}
 
 
@@ -301,6 +302,8 @@ class Project:
             state = task.state
             blockers = [f"{dep} 尚未交付到当前基线" for dep in task.deps if not included[dep]]
             status = state.get("status", "blocked" if blockers else "ready")
+            if not state.get("thread_id") and task.definition.get("source_status") == "已完成":
+                status = "unverified"
             if included[task.id]:
                 status = "done"
             elif status == "done":
@@ -349,6 +352,8 @@ class Project:
                 f"可以使用 taskdeck pr {task.id} 创建或复用 PR；该命令读取 delivery.md。"
                 "如果本分支已有 PR，更新原 PR。不要合并 PR，不要启动其他任务。"
                 "失败、缺少凭证或验证未通过时明确报告，不要声称成功。\n\n"
+                f"原始任务文件：{task.definition.get('source', rel + '/description.md')}。"
+                "任务原文中的相对链接以原始任务文件所在目录解析。\n\n"
                 f"任务清单：\n{manifest}\n任务说明：\n{task.description()}")
 
     def diff(self, ident):

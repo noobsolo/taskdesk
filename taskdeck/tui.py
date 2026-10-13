@@ -14,6 +14,7 @@ from textual.widgets import Button, DataTable, Footer, Header, Input, Label, Sel
 
 from .core import DeckError, LABELS, Project, read_json
 from .service import ensure_service, rpc, snapshot, view
+from .importer import detect_source, import_markdown, legacy_files
 
 
 def transcript_text(entries):
@@ -110,6 +111,33 @@ class NewTaskModal(ModalScreen):
             self.dismiss({"id": self.query_one("#new-id", Input).value.strip(),
                           "title": self.query_one("#new-title", Input).value.strip(),
                           "deps": [x.strip() for x in self.query_one("#new-deps", Input).value.split(",") if x.strip()]})
+
+
+class CompletionModal(ModalScreen):
+    CSS = """
+    CompletionModal { align: center middle; }
+    #completion-box { width: 80%; max-width: 100; height: auto; padding: 1 2; border: round #6caea3; background: #172026; }
+    #completion-box Static { height: auto; margin: 1 0; }
+    #completion-buttons { height: 3; }
+    """
+    BINDINGS = [("escape", "dismiss(None)", "返回")]
+
+    def __init__(self, task):
+        super().__init__()
+        self.task = task
+
+    def compose(self):
+        with Vertical(id="completion-box"):
+            yield Label(f"确认 {self.task.id} 已完成")
+            yield Static("请确认这个提交包含本任务的真实交付。系统会检查目标基线是否已包含该提交；文档的完成文字本身不会解除依赖。", markup=False)
+            yield Input(value=self.task.definition.get("completion_candidate", ""), placeholder="实际交付/合并提交 SHA", id="completion-commit")
+            with Horizontal(id="completion-buttons"):
+                yield Button("确认完成", id="confirm-completion", variant="success")
+                yield Button("返回", id="cancel-completion")
+
+    @on(Button.Pressed)
+    def respond(self, event):
+        self.dismiss(self.query_one("#completion-commit", Input).value.strip() if event.button.id == "confirm-completion" else None)
 
 
 class Conversation(Screen):
@@ -236,6 +264,7 @@ class TaskDeck(App):
     #filters { height: 3; }
     #search { width: 1fr; }
     #filter { width: 22; }
+    #import { min-width: 12; }
     #main { height: 1fr; }
     #tasks { width: 45%; border: round #34454e; }
     #detail-pane { width: 55%; padding: 0 1; }
@@ -259,6 +288,7 @@ class TaskDeck(App):
         self.signature = None
         self.refreshing = False
         self.rendering = False
+        self.import_source = detect_source(project)
 
     def compose(self):
         yield Header()
@@ -266,7 +296,8 @@ class TaskDeck(App):
         with Horizontal(id="filters"):
             yield Input(placeholder="搜索 ID / 标题 / 依赖", id="search")
             yield Select([("全部任务", "all"), ("可开始", "ready"), ("运行中", "running"),
-                          ("等你处理", "waiting"), ("被阻塞", "blocked"), ("有 PR", "pr")], value="all", allow_blank=False, id="filter")
+                          ("等你处理", "waiting"), ("待核对", "unverified"), ("被阻塞", "blocked"), ("有 PR", "pr")], value="all", allow_blank=False, id="filter")
+            yield Button("导入任务", id="import")
         with Horizontal(id="main"):
             yield DataTable(id="tasks", cursor_type="row", zebra_stripes=True)
             with Vertical(id="detail-pane"):
@@ -289,6 +320,7 @@ class TaskDeck(App):
             yield Button("创建 PR", id="create-pr")
             yield Button("打开 PR", id="open-pr")
             yield Button("同步", id="sync")
+            yield Button("确认完成", id="complete", disabled=True)
         yield Footer()
 
     async def on_mount(self):
@@ -361,15 +393,28 @@ class TaskDeck(App):
     def details(self):
         row = next((r for r in self.rows if r["id"] == self.selected), None)
         if not row:
-            self.query_one("#detail-title", Static).update("暂无任务 · 点击新建或运行 taskdeck add")
+            self.query_one("#detail-title", Static).update("暂无任务")
+            hint = "点击「新建」登记任务，或运行 taskdeck add。"
+            if not self.rows and self.import_source:
+                count = len(legacy_files(self.import_source))
+                hint = f"发现 {self.import_source.relative_to(self.project.root)} 中有 {count} 份任务文档，点击「导入任务」。导入不会启动 Codex。"
+            elif self.rows:
+                hint = "没有匹配的任务，请清空搜索或切换筛选。"
             for ident in ("spec", "deps", "events"):
-                self.query_one("#" + ident, TextArea).load_text("")
+                self.query_one("#" + ident, TextArea).load_text(hint if ident == "spec" else "")
+            self.query_one("#notice", Static).update(hint)
+            for ident in ("start", "enter", "show-diff", "create-pr", "open-pr", "complete"):
+                self.query_one("#" + ident, Button).disabled = True
             return
         self.query_one("#detail-title", Static).update(f"{row['id']}  {row['title']}  ·  {row['label']}")
         task = self.project.task(row["id"])
         state = row["state"]
         text = task.description() + "\n\n验收要求\n" + "\n".join("□ " + x for x in task.definition.get("acceptance", []))
         text += f"\n\n任务目录：{task.folder}\n分支：{state.get('branch', '—')}\nSession：{state.get('thread_id', '—')}"
+        if task.definition.get("source"):
+            text += f"\n原始任务：{task.definition['source']}\n原文状态：{task.definition.get('source_status', '—')}"
+        if row["status"] == "unverified":
+            text += "\n\n原文档标记已完成。请点击「确认完成」核对实际交付提交；尚未纳入目标基线的任务会继续阻塞后续。"
         if state.get("plan"):
             text += "\n\nCodex 当前计划\n" + "\n".join(f"{x.get('status', '')} · {x.get('step', '')}" for x in state["plan"])
         if state.get("error"):
@@ -377,13 +422,16 @@ class TaskDeck(App):
         self.set_text("spec", text)
         by_id = {r["id"]: r for r in self.rows}
         lines = ["前置依赖（展开完整上游链）"]
-        def walk(ident, prefix="", seen=None):
-            seen = seen or set()
+        expanded = {row["id"]}
+        def walk(ident, prefix=""):
             for dep in by_id[ident]["deps"]:
                 entry = by_id[dep]
                 lines.append(prefix + ("✓ " if entry["included"] else "· ") + f"{dep} {entry['title']} [{entry['label']}]")
-                if dep not in seen:
-                    walk(dep, prefix + "  ", seen | {dep})
+                if dep in expanded:
+                    lines[-1] += "（已在上方展开）"
+                else:
+                    expanded.add(dep)
+                    walk(dep, prefix + "  ")
         walk(row["id"])
         if not row["deps"]:
             lines.append("无前置依赖")
@@ -393,6 +441,12 @@ class TaskDeck(App):
         event_file = task.local / "events.jsonl"
         self.set_text("events", event_file.read_text()[-40000:] if event_file.exists() else "尚无运行记录")
         self.query_one("#open-pr", Button).disabled = not bool(state.get("pr"))
+        self.query_one("#start", Button).disabled = row["status"] in {"unverified", "done"} or bool(row["blockers"])
+        self.query_one("#enter", Button).disabled = False
+        self.query_one("#show-diff", Button).disabled = False
+        self.query_one("#create-pr", Button).disabled = not state.get("worktree")
+        self.query_one("#complete", Button).disabled = row["status"] != "unverified"
+        self.query_one("#notice", Static).update("选择任务后手动开始；导入、浏览、确认完成都不会启动 Codex 任务。")
 
     def set_text(self, ident, text):
         area = self.query_one("#" + ident, TextArea)
@@ -427,6 +481,7 @@ class TaskDeck(App):
     async def action_start(self):
         ident = self.selected
         if not ident:
+            self.notify("请先新建或导入任务，再选择要开始的任务", severity="warning")
             return
         try:
             self.notify(f"准备 {ident} 的工作目录和会话…")
@@ -471,10 +526,37 @@ class TaskDeck(App):
         except DeckError as e:
             self.notify(str(e), severity="error", timeout=10)
 
+    @work(exclusive=True, group="import")
+    async def import_tasks(self):
+        try:
+            result = await asyncio.to_thread(import_markdown, self.project)
+            self.notify(f"导入 {result['imported']} 个任务，保留 {result['skipped']} 个已有任务；没有启动 Codex", timeout=8)
+            await self.reload()
+        except DeckError as e:
+            self.notify(str(e), severity="error", timeout=10)
+
+    def confirm_completion(self):
+        if self.selected:
+            ident = self.selected
+            self.push_screen(CompletionModal(self.project.task(ident)), lambda commit: self.record_completion(ident, commit))
+
+    @work(group="completion")
+    async def record_completion(self, ident, commit):
+        if not commit:
+            return
+        try:
+            await asyncio.to_thread(ensure_service, self.project)
+            await asyncio.to_thread(rpc, self.project, {"op": "complete", "task": ident, "commit": commit})
+            self.notify("已确认交付提交在目标基线中，后续任务等待你手动开始")
+            await self.reload()
+        except DeckError as e:
+            self.notify(str(e), severity="error", timeout=10)
+
     @on(Button.Pressed)
     def buttons(self, event):
         mapping = {"new": self.action_new, "start": self.action_start, "enter": self.action_conversation,
-                   "show-diff": self.show_diff, "create-pr": self.create_pr, "sync": self.action_sync}
+                   "show-diff": self.show_diff, "create-pr": self.create_pr, "sync": self.action_sync,
+                   "import": self.import_tasks, "complete": self.confirm_completion}
         if event.button.id in mapping:
             mapping[event.button.id]()
         elif event.button.id == "open-pr" and self.selected:
