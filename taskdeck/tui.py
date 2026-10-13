@@ -17,35 +17,6 @@ from .terminal import CodexPane, NativeTerminal
 from .importer import detect_source, import_markdown, legacy_files
 
 
-class NewTaskModal(ModalScreen):
-    CSS = """
-    NewTaskModal { align: center middle; }
-    #new-box { width: 75%; max-width: 85; height: auto; padding: 1 2; border: round #6caea3; background: #172026; }
-    #new-box Input { margin: 1 0; }
-    #new-buttons { height: 3; }
-    """
-    BINDINGS = [("escape", "dismiss(None)", "返回")]
-
-    def compose(self):
-        with Vertical(id="new-box"):
-            yield Label("新建任务 · 创建后等待你手动开始")
-            yield Input(placeholder="任务 ID，例如 T001", id="new-id")
-            yield Input(placeholder="任务标题", id="new-title")
-            yield Input(placeholder="前置依赖，逗号分隔，例如 T001,T002", id="new-deps")
-            with Horizontal(id="new-buttons"):
-                yield Button("创建", id="create", variant="success")
-                yield Button("返回", id="cancel-new")
-
-    @on(Button.Pressed)
-    def respond(self, event):
-        if event.button.id == "cancel-new":
-            self.dismiss(None)
-        else:
-            self.dismiss({"id": self.query_one("#new-id", Input).value.strip(),
-                          "title": self.query_one("#new-title", Input).value.strip(),
-                          "deps": [x.strip() for x in self.query_one("#new-deps", Input).value.split(",") if x.strip()]})
-
-
 class CompletionModal(ModalScreen):
     CSS = """
     CompletionModal { align: center middle; }
@@ -91,13 +62,12 @@ class TaskDeck(App):
     TabbedContent { height: 1fr; }
     TabPane { padding: 0; }
     TextArea { border: none; background: #10171c; }
-    #actions { height: 6; grid-size: 4 2; grid-columns: 1fr 1fr 1fr 1fr; grid-rows: 3 3; grid-gutter: 0 1; }
+    #actions { height: 3; grid-size: 4 1; grid-columns: 1fr 1fr 1fr 1fr; grid-rows: 3; grid-gutter: 0 1; }
     #actions Button { min-width: 10; width: 1fr; margin: 0; }
     #notice { height: 1; color: #ddb875; padding: 0 1; }
     """
     BINDINGS = [("ctrl+q", "quit", "退出面板"), ("s", "start", "开始"),
-                ("enter", "conversation", "进入会话"), ("slash", "search", "搜索"),
-                ("r", "sync", "同步 PR"), ("n", "new", "新建"), ("c", "complete", "确认完成"),
+                ("slash", "search", "搜索"), ("r", "sync", "同步 PR"), ("c", "complete", "确认完成"),
                 ("ctrl+g", "task_list", "任务列表")]
 
     def __init__(self, project):
@@ -129,17 +99,12 @@ class TaskDeck(App):
                         yield TextArea("", read_only=True, id="spec")
                     with TabPane("依赖", id="deps-tab"):
                         yield TextArea("", read_only=True, id="deps")
-                    with TabPane("改动", id="diff-tab"):
-                        yield TextArea("点击「查看改动」加载", read_only=True, id="diff")
                     with TabPane("记录", id="events-tab"):
                         yield TextArea("", read_only=True, id="events")
-        yield Static("新建任务后编辑 description.md 与 task.yaml，再手动开始。", id="notice", markup=False)
+        yield Static("导入任务或运行 taskdeck add 登记任务，然后手动开始。", id="notice", markup=False)
         with Grid(id="actions"):
-            yield Button("新建", id="new")
             yield Button("开始", id="start", variant="success")
             yield Button("确认完成", id="complete", disabled=True)
-            yield Button("进入会话", id="enter", variant="primary")
-            yield Button("查看改动", id="show-diff")
             yield Button("打开 PR", id="open-pr")
             yield Button("同步", id="sync")
         yield Footer()
@@ -213,11 +178,6 @@ class TaskDeck(App):
             self.selected = str(event.row_key.value)
             self.details()
 
-    @on(DataTable.RowSelected, "#tasks")
-    def enter_row(self, event):
-        self.selected = str(event.row_key.value)
-        self.action_conversation()
-
     def details(self):
         row = next((r for r in self.rows if r["id"] == self.selected), None)
         tabs = self.query_one(TabbedContent)
@@ -233,7 +193,7 @@ class TaskDeck(App):
             self.connect_session(self.selected)
         if not row:
             self.query_one("#detail-title", Static).update("暂无任务")
-            hint = "点击「新建」登记任务，或运行 taskdeck add。"
+            hint = "点击「导入任务」导入已有任务，或运行 taskdeck add 登记任务。"
             if not self.rows and self.import_source:
                 count = len(legacy_files(self.import_source))
                 hint = f"发现 {self.import_source.relative_to(self.project.root)} 中有 {count} 份任务文档，点击「导入任务」。导入不会启动 Codex。"
@@ -242,7 +202,7 @@ class TaskDeck(App):
             for ident in ("spec", "deps", "events"):
                 self.query_one("#" + ident, TextArea).load_text(hint if ident == "spec" else "")
             self.query_one("#notice", Static).update(hint)
-            for ident in ("start", "enter", "show-diff", "open-pr", "complete"):
+            for ident in ("start", "open-pr", "complete"):
                 self.query_one("#" + ident, Button).disabled = True
             return
         self.query_one("#detail-title", Static).update(f"{row['id']}  {row['title']}  ·  {row['label']}")
@@ -285,8 +245,6 @@ class TaskDeck(App):
         self.set_text("events", event_file.read_text()[-40000:] if event_file.exists() else "尚无运行记录")
         self.query_one("#open-pr", Button).disabled = not bool(state.get("pr"))
         self.query_one("#start", Button).disabled = row["status"] in {"unverified", "done", "delivered"} or bool(row["blockers"])
-        self.query_one("#enter", Button).disabled = not has_session
-        self.query_one("#show-diff", Button).disabled = False
         self.query_one("#complete", Button).disabled = bool(row.get("delivery_confirmed", row["status"] == "done"))
         self.query_one("#notice", Static).update("选择任务后手动开始；导入、浏览、确认完成都不会启动 Codex 任务。")
 
@@ -308,7 +266,7 @@ class TaskDeck(App):
     def action_task_list(self):
         self.query_one("#tasks", DataTable).focus()
 
-    def action_conversation(self):
+    def open_session_tab(self):
         if self.selected and self.project.task(self.selected).state.get("thread_id"):
             self.query_one(TabbedContent).active = "codex-tab"
             self.connect_session(self.selected)
@@ -323,26 +281,11 @@ class TaskDeck(App):
     async def connect_session(self, ident):
         await self.query_one("#codex-pane", CodexPane).select_task(ident)
 
-    def action_new(self):
-        self.push_screen(NewTaskModal(), self.create_task)
-
-    @work(group="create")
-    async def create_task(self, values):
-        if values is None:
-            return
-        try:
-            await asyncio.to_thread(self.project.add, values["id"], values["title"], values["deps"])
-            self.selected = values["id"]
-            self.notify("任务已创建，请编辑任务说明后手动开始")
-            await self.reload()
-        except DeckError as e:
-            self.notify(str(e), severity="error")
-
     @work(group="task-action")
     async def action_start(self):
         ident = self.selected
         if not ident:
-            self.notify("请先新建或导入任务，再选择要开始的任务", severity="warning")
+            self.notify("请先导入任务或运行 taskdeck add 登记任务，再选择要开始的任务", severity="warning")
             return
         try:
             self.notify(f"准备 {ident} 的工作目录和会话…")
@@ -350,7 +293,7 @@ class TaskDeck(App):
             await asyncio.to_thread(rpc, self.project, {"op": "start", "task": ident})
             await self.reload()
             if self.selected == ident:
-                self.action_conversation()
+                self.open_session_tab()
         except DeckError as e:
             self.notify(str(e), severity="error", timeout=10)
             await self.reload()
@@ -364,17 +307,6 @@ class TaskDeck(App):
             await self.reload()
         except DeckError as e:
             self.notify(str(e), severity="error")
-
-    @work(group="diff")
-    async def show_diff(self):
-        ident = self.selected
-        if ident:
-            try:
-                text = await asyncio.to_thread(self.project.diff, ident)
-                self.set_text("diff", text)
-                self.query_one(TabbedContent).active = "diff-tab"
-            except DeckError as e:
-                self.notify(str(e), severity="error")
 
     @work(exclusive=True, group="import")
     async def import_tasks(self):
@@ -413,8 +345,7 @@ class TaskDeck(App):
 
     @on(Button.Pressed)
     def buttons(self, event):
-        mapping = {"new": self.action_new, "start": self.action_start, "enter": self.action_conversation,
-                   "show-diff": self.show_diff, "sync": self.action_sync,
+        mapping = {"start": self.action_start, "sync": self.action_sync,
                    "import": self.import_tasks, "complete": self.confirm_completion}
         if event.button.id in mapping:
             mapping[event.button.id]()

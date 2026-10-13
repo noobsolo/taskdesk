@@ -105,7 +105,7 @@ def main(argv=None):
             def open_chat():
                 app.selected = args.id
                 app.details()
-                app.action_conversation()
+                app.open_session_tab()
             app.call_after_refresh(open_chat)
             app.run()
         elif args.command == "diff":

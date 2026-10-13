@@ -48,3 +48,10 @@
 - Live Codex 0.162.1 in an isolated temporary repository: the native folder trust dialog and conversation rendered inside the homepage tab; Chinese input appeared in the native composer. After sending a no-file-change test request, the service observed its real turn on the original thread; Escape changed that turn to interrupted without leaving the tab. Test threads were archived and test services closed.
 - Actual screenshot exported from the native process: `/private/tmp/taskdeck-native.svg.png`. The final preview shows unsent Chinese input and starts no model turn.
 - Existing k12 service was inspected read-only and left running because T007 was active. The new native transport takes effect after the old project service and dashboard are restarted when its running work has finished. The tab displays a clear upgrade message if it encounters the old service.
+
+## Dashboard action cleanup — 2026-10-13
+
+- Deleted the Enter session, New and View changes buttons, their dashboard action handlers, the new-task modal, the n/Enter dashboard shortcuts, and the changes tab/loader. Existing sessions open by clicking the Codex tab; starting a task still opens its native session.
+- The remaining Start, Confirm completion, Open PR and Sync actions fit on one row. Existing 80×24 completion-control checks and native-tab input/client-retention checks passed. CLI task registration, diff and chat commands remain available.
+- Full existing suite with host permissions: `.venv/bin/python -m pytest -q` — 41 passed in 16.53s; removed the obsolete new-task-modal test. `git diff --check` passed.
+- Regenerated `taskdeck.svg` and `taskdeck.png` from the actual 140×42 Textual dashboard and visually verified the four-button layout. No model turn or actual project service restart was required.
