@@ -5,7 +5,7 @@ from textual.widgets import Button, DataTable, Input, TabbedContent, TextArea
 from taskdeck.tui import CompletionModal, TaskDeck
 
 
-async def test_mouse_keyboard_search_and_enter_do_not_start_tasks(project):
+async def test_mouse_keyboard_search_do_not_start_tasks(project):
     project.add("T001", "构建基础")
     project.add("T002", "数据库实现", ["T001"])
     app = TaskDeck(project)
@@ -18,7 +18,6 @@ async def test_mouse_keyboard_search_and_enter_do_not_start_tasks(project):
         await pilot.pause()
         assert app.selected == "T002"
         assert "T001" in app.query_one("#deps", TextArea).text
-        assert app.query_one("#enter", Button).disabled
         assert not app.query_one(TabbedContent).get_tab("codex-tab").display
         await pilot.click("#search")
         await pilot.press("T", "0", "0", "1")
@@ -48,7 +47,7 @@ async def test_codex_tab_is_first_and_only_visible_for_existing_session(project,
         tabs = app.query_one(TabbedContent)
         assert tabs.get_tab("codex-tab").display
         assert tabs.get_tab("codex-tab").region.x < tabs.get_tab("spec-tab").region.x
-        await pilot.click("#enter")
+        await pilot.click(app.query_one(TabbedContent).get_tab("codex-tab"))
         await pilot.pause()
         assert tabs.active == "codex-tab"
         assert opened and set(opened) == {"T001"}
@@ -86,7 +85,7 @@ async def test_native_tab_keeps_task_clients_and_owns_dashboard_shortcut_keys(pr
     app = TaskDeck(project)
     async with app.run_test(size=(130, 40)) as pilot:
         await pilot.pause()
-        await pilot.click("#enter")
+        await pilot.click(app.query_one(TabbedContent).get_tab("codex-tab"))
         pane = app.query_one(CodexPane)
         for _ in range(50):
             if "T001" in pane.terminals and pane.terminals["T001"].session and "READY" in screen_text(pane.terminals["T001"].session.screen).plain:
@@ -114,28 +113,13 @@ async def test_native_tab_keeps_task_clients_and_owns_dashboard_shortcut_keys(pr
         assert not project.socket.exists()
 
 
-async def test_new_task_modal_and_small_terminal(project):
-    app = TaskDeck(project)
-    async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
-        await pilot.click("#new")
-        await pilot.pause()
-        app.screen.query_one("#new-id", Input).value = "T001"
-        app.screen.query_one("#new-title", Input).value = "新任务"
-        await pilot.click("#create")
-        await pilot.pause()
-        assert project.task("T001").title == "新任务"
-        assert app.query_one("#tasks", DataTable).row_count == 1
-        assert not project.task("T001").local.exists()
-
-
 async def test_completion_button_visible_and_clickable_in_80_column_terminal(project):
     task = project.add("T001", "已交付任务")
     (task.folder / "task.yaml").write_text("id: T001\ntitle: 已交付任务\nsource_status: 已完成\n")
     app = TaskDeck(project)
     async with app.run_test(size=(80, 24)) as pilot:
         await pilot.pause()
-        for ident in ("new", "start", "complete", "enter", "show-diff", "open-pr", "sync"):
+        for ident in ("start", "complete", "open-pr", "sync"):
             region = app.query_one("#" + ident, Button).region
             assert region.x >= 0 and region.right <= 80
             assert region.y >= 0 and region.bottom <= 24
