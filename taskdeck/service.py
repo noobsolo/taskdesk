@@ -144,6 +144,11 @@ class Service:
                 stderr = (self.project.runtime / "codex.log").open("ab")
                 self.codex = self.codex_factory(self.project.config.get("codex_command", ["codex", "app-server"]),
                                                self.project.root, self.event, stderr)
+                argv = self.project.config.get("codex_command", ["codex", "app-server"])
+                if isinstance(self.codex, Codex) and len(argv) > 1 and argv[1] == "app-server":
+                    if "--listen" in argv or "--stdio" in argv:
+                        raise DeckError("原生会话需要 taskdeck 管理本地 Codex socket，请移除 codex_command 的 --listen/--stdio")
+                    self.codex.endpoint = "unix://" + str(self.project.codex_socket)
             await self.codex.connect()
 
     async def load_thread(self, task, path):
@@ -164,6 +169,8 @@ class Service:
                 status = result.get("thread", {}).get("status", {})
                 if status.get("type") == "active":
                     task.save(status="running")
+                elif status.get("type") == "idle" and task.state.get("status") == "disconnected":
+                    task.save(status="idle", turn_id=None, error=None)
             return thread_id
         result = await self.codex.rpc("thread/start", params)
         thread_id = result["thread"]["id"]
@@ -307,6 +314,18 @@ class Service:
         if op == "diff":
             return {"diff": await asyncio.to_thread(self.project.diff, task.id)}
         async with self.locks.setdefault(task.id, asyncio.Lock()):
+            if op == "attach":
+                state = task.state
+                if not state.get("thread_id"):
+                    raise DeckError("请先手动开始任务")
+                path = Path(state.get("worktree") or self.project.root)
+                await self.load_thread(task, path)
+                endpoint = getattr(self.codex, "endpoint", None)
+                if not endpoint:
+                    raise DeckError("当前 codex_command 没有原生终端接入端点")
+                argv = self.project.config.get("codex_command", ["codex", "app-server"])
+                return {"thread_id": state["thread_id"], "cwd": str(path), "endpoint": endpoint,
+                        "command": [argv[0], "resume", "--remote", endpoint, "--no-alt-screen", "-C", str(path), state["thread_id"]]}
             if op == "start":
                 return await self.start(task, request.get("text"))
             if op == "send":

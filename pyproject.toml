@@ -7,7 +7,7 @@ name = "taskdeck"
 version = "0.1.0"
 description = "Manual-first Git task and Codex session dashboard"
 requires-python = ">=3.12"
-dependencies = ["textual>=6,<9", "PyYAML>=6,<7"]
+dependencies = ["textual>=6,<9", "PyYAML>=6,<7", "pyte>=0.8.2,<0.9", "websockets>=15,<17"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8,<10", "pytest-asyncio>=0.24,<2"]

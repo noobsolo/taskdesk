@@ -157,6 +157,7 @@ class Project:
         digest = hashlib.sha256(str(self.common).encode()).hexdigest()[:20]
         # macOS Unix sockets have a short path limit. User-private fixed parent.
         self.socket = Path(tempfile.gettempdir()) / f"taskdeck-{os.getuid()}" / (digest + ".sock")
+        self.codex_socket = self.socket.with_suffix(".codex.sock")
 
     @classmethod
     def discover(cls, cwd=None):
