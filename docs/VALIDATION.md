@@ -38,3 +38,13 @@
 - Corrected k12 target_branch from the previous feature branch to main. The source checkout and task worktree were not switched or reset. Reloaded only the idle service; the saved T003 thread was preserved and no model turn or PR was created.
 - Verified actual k12 UI data at 80×24: T003 selected, all action buttons visible, no Create PR widget, original session shown and Enter enabled. Confirm completion is disabled for this task because its PR is already in the baseline.
 - Existing dashboard processes need Ctrl+Q and taskdeck to load the changed controls; exiting the dashboard preserves the task service and sessions.
+
+## Native Codex tab — 2026-10-13
+
+- Replaced the custom conversation screen, composer and JSON request modal with the real Codex CLI running in a PTY inside the first detail tab. Tasks without a saved thread hide the tab; starting a task reveals and opens it. Switching tasks retains each task's CLI client.
+- Both the task service and native CLI connect to the same local app-server over a user-private Unix WebSocket socket. Attachment resumes the existing thread without starting a model turn. Credentials remain managed by Codex.
+- Automated checks cover dynamic visibility, first-tab ordering, native key ownership, Ctrl+G focus return, cached clients across task selection, real PTY Escape/Chinese paste/resize, existing-thread attachment, idle recovery, and the existing task/worktree/PR behavior.
+- Final full suite with host permissions for local socket tests: `.venv/bin/python -m pytest -q` — 42 passed in 17.96s. `git diff --check` passed. The installed global launcher uses this checkout's `.venv/bin/python -m taskdeck`.
+- Live Codex 0.162.1 in an isolated temporary repository: the native folder trust dialog and conversation rendered inside the homepage tab; Chinese input appeared in the native composer. After sending a no-file-change test request, the service observed its real turn on the original thread; Escape changed that turn to interrupted without leaving the tab. Test threads were archived and test services closed.
+- Actual screenshot exported from the native process: `/private/tmp/taskdeck-native.svg.png`. The final preview shows unsent Chinese input and starts no model turn.
+- Existing k12 service was inspected read-only and left running because T007 was active. The new native transport takes effect after the old project service and dashboard are restarted when its running work has finished. The tab displays a clear upgrade message if it encounters the old service.

@@ -7,8 +7,8 @@ import yaml
 
 from taskdeck.core import Project
 from taskdeck.service import ensure_service, online, rpc, view
-from taskdeck.tui import Conversation, TaskDeck
-from textual.widgets import TextArea
+from taskdeck.tui import TaskDeck
+from textual.widgets import TabbedContent
 
 
 async def test_real_background_process_and_tui_steering(project):
@@ -27,15 +27,10 @@ async def test_real_background_process_and_tui_steering(project):
         app = TaskDeck(project)
         async with app.run_test(size=(130, 40)) as pilot:
             await pilot.pause()
-            await pilot.click("#enter")
-            await pilot.pause()
-            assert isinstance(app.screen, Conversation)
-            app.screen.query_one("#composer", TextArea).load_text("先检查测试")
-            await pilot.click("#send")
-            await pilot.pause(0.5)
-            assert "收到调整：先检查测试" in app.screen.query_one("#transcript", TextArea).text
-            await pilot.click("#stop")
-            await pilot.pause(0.5)
+            assert app.query_one(TabbedContent).get_tab("codex-tab").display
+            await asyncio.to_thread(rpc, project, {"op": "send", "task": "T001", "text": "先检查测试"})
+            assert "收到调整：先检查测试" in view(project, "T001")["transcript"][-1]["text"]
+            await asyncio.to_thread(rpc, project, {"op": "stop", "task": "T001"})
             assert project.task("T001").state["status"] == "interrupted"
         # Closing the dashboard leaves the independent service and session alive.
         assert online(project)

@@ -2,86 +2,19 @@ from __future__ import annotations
 
 import asyncio
 import json
-from pathlib import Path
 import webbrowser
 
 from rich.text import Text
 from textual import on, work
 from textual.app import App, ComposeResult
-from textual.containers import Grid, Horizontal, Vertical, VerticalScroll
-from textual.screen import ModalScreen, Screen
+from textual.containers import Grid, Horizontal, Vertical
+from textual.screen import ModalScreen
 from textual.widgets import Button, DataTable, Footer, Header, Input, Label, Select, Static, TabbedContent, TabPane, TextArea
 
-from .core import DeckError, LABELS, Project, read_json
-from .service import ensure_service, rpc, snapshot, view
+from .core import DeckError, LABELS, Project
+from .service import ensure_service, rpc, snapshot
+from .terminal import CodexPane, NativeTerminal
 from .importer import detect_source, import_markdown, legacy_files
-
-
-def transcript_text(entries):
-    labels = {"userMessage": "你", "agentMessage": "Codex", "commandExecution": "命令", "fileChange": "文件修改"}
-    return "\n\n".join(f"{labels.get(e['kind'], e['kind'])}  {e.get('time', '')[11:19]}\n{e['text']}" for e in entries)
-
-
-class RequestModal(ModalScreen):
-    CSS = """
-    RequestModal { align: center middle; }
-    #request-box { width: 85%; max-width: 110; height: 85%; padding: 1 2; border: round #ddb875; background: #172026; }
-    #request-data { height: 1fr; }
-    #question-fields { height: auto; max-height: 60%; }
-    #request-actions { height: 3; }
-    #request-actions Button { margin-right: 1; }
-    """
-    BINDINGS = [("escape", "dismiss(None)", "返回")]
-
-    def __init__(self, request):
-        super().__init__()
-        self.request = request
-
-    def compose(self):
-        params = self.request["params"]
-        with Vertical(id="request-box"):
-            yield Label("Codex 等待你的处理")
-            yield TextArea(json.dumps(params, ensure_ascii=False, indent=2), read_only=True, id="request-data")
-            with VerticalScroll(id="question-fields"):
-                for index, q in enumerate(params.get("questions", [])):
-                    yield Label(q.get("question", q.get("header", "问题")))
-                    options = q.get("options") or []
-                    if options:
-                        yield Label("  /  ".join(o.get("label", "") for o in options))
-                    yield Input(placeholder="输入回答或选项文字", id=f"answer-{index}")
-                if self.request["method"] == "mcpServer/elicitation/request":
-                    yield Input(placeholder='表单回答 JSON，例如 {"value":"..."}', id="mcp-answer")
-            with Horizontal(id="request-actions"):
-                yield Button("提交回答" if params.get("questions") else "允许本次", id="allow", variant="success")
-                yield Button("拒绝", id="deny", variant="error")
-                yield Button("返回", id="cancel")
-
-    @on(Button.Pressed)
-    def respond(self, event):
-        if event.button.id == "cancel":
-            self.dismiss(None)
-        elif event.button.id == "deny":
-            if self.request["method"] == "item/tool/requestUserInput":
-                self.dismiss(None)
-            else:
-                self.dismiss("decline")
-        elif event.button.id == "allow":
-            if self.request["params"].get("questions"):
-                answers = {q["id"]: self.query_one(f"#answer-{i}", Input).value
-                           for i, q in enumerate(self.request["params"]["questions"])}
-                if not all(answers.values()):
-                    self.notify("请回答所有问题", severity="warning")
-                    return
-                self.dismiss(answers)
-            elif self.request["method"] == "mcpServer/elicitation/request":
-                try:
-                    content = json.loads(self.query_one("#mcp-answer", Input).value or "{}")
-                except ValueError:
-                    self.notify("请输入合法 JSON", severity="error")
-                    return
-                self.dismiss({"action": "accept", "content": content})
-            else:
-                self.dismiss("accept")
 
 
 class NewTaskModal(ModalScreen):
@@ -140,120 +73,6 @@ class CompletionModal(ModalScreen):
         self.dismiss(self.query_one("#completion-commit", Input).value.strip() if event.button.id == "confirm-completion" else None)
 
 
-class Conversation(Screen):
-    CSS = """
-    #conversation-info { height: auto; max-height: 4; padding: 0 1; color: #8bbfb6; }
-    #transcript { height: 1fr; border: round #34454e; }
-    #composer { height: 6; border: round #6caea3; }
-    #chat-buttons { height: 3; }
-    #chat-buttons Button { margin-right: 1; }
-    """
-    BINDINGS = [("escape", "back", "任务面板"), ("ctrl+s", "send", "发送/调整"),
-                ("ctrl+x", "stop", "中断当前轮次")]
-
-    def __init__(self, project, ident):
-        super().__init__()
-        self.project, self.ident = project, ident
-        self.requests = []
-        self.refreshing = False
-
-    def compose(self):
-        yield Header()
-        yield Static(f"{self.ident} · 正在连接", id="conversation-info", markup=False)
-        yield TextArea("尚无对话。请在任务面板手动开始。", read_only=True, id="transcript")
-        yield TextArea(id="composer")
-        with Horizontal(id="chat-buttons"):
-            yield Button("发送 / 调整", id="send", variant="primary")
-            yield Button("中断轮次", id="stop", variant="warning")
-            yield Button("处理请求", id="request")
-            yield Button("返回面板", id="back")
-        yield Footer()
-
-    async def on_mount(self):
-        await self.refresh_view()
-        self.set_interval(0.7, self.refresh_view)
-        self.query_one("#composer", TextArea).focus()
-
-    async def refresh_view(self):
-        if self.refreshing:
-            return
-        self.refreshing = True
-        try:
-            data = await asyncio.to_thread(view, self.project, self.ident)
-            state = data["state"]
-            self.requests = data["requests"]
-            info = f"{self.ident} · {LABELS.get(state.get('status'), state.get('status', '未开始'))} · session {state.get('thread_id', '—')}"
-            if state.get("error"):
-                info += "\n" + str(state["error"])
-            self.query_one("#conversation-info", Static).update(info)
-            text = transcript_text(data["transcript"]) or "尚无对话。请在任务面板手动开始。"
-            transcript = self.query_one("#transcript", TextArea)
-            if transcript.text != text:
-                follow = transcript.scroll_y >= transcript.max_scroll_y - 2
-                position = transcript.scroll_y
-                transcript.load_text(text)
-                if follow:
-                    transcript.scroll_end(animate=False)
-                else:
-                    transcript.scroll_to(y=position, animate=False)
-            self.query_one("#request", Button).disabled = not self.requests
-            self.query_one("#stop", Button).disabled = not state.get("turn_id")
-        except DeckError as e:
-            self.query_one("#conversation-info", Static).update(str(e))
-        finally:
-            self.refreshing = False
-
-    @work(exclusive=True, group="chat-action")
-    async def action_send(self):
-        composer = self.query_one("#composer", TextArea)
-        text = composer.text.strip()
-        if not text:
-            return
-        try:
-            await asyncio.to_thread(ensure_service, self.project)
-            await asyncio.to_thread(rpc, self.project, {"op": "send", "task": self.ident, "text": text})
-            composer.clear()
-            await self.refresh_view()
-            self.notify("消息已交给当前会话")
-        except DeckError as e:
-            self.notify(str(e), severity="error", timeout=8)
-
-    @work(exclusive=True, group="chat-stop")
-    async def action_stop(self):
-        try:
-            await asyncio.to_thread(rpc, self.project, {"op": "stop", "task": self.ident})
-            self.notify("已请求中断，等待 Codex 完成中断")
-        except DeckError as e:
-            self.notify(str(e), severity="error")
-
-    def action_back(self):
-        self.app.pop_screen()
-
-    @on(Button.Pressed)
-    def buttons(self, event):
-        event.stop()
-        if event.button.id == "send":
-            self.action_send()
-        elif event.button.id == "stop":
-            self.action_stop()
-        elif event.button.id == "back":
-            self.action_back()
-        elif event.button.id == "request" and self.requests:
-            request = self.requests[0]
-            self.app.push_screen(RequestModal(request), lambda result: self.answer(request, result))
-
-    @work(group="answer")
-    async def answer(self, request, result):
-        if result is None:
-            return
-        try:
-            await asyncio.to_thread(rpc, self.project, {"op": "answer", "task": self.ident,
-                                                       "request_id": request["id"], "response": result})
-            await self.refresh_view()
-        except DeckError as e:
-            self.notify(str(e), severity="error")
-
-
 class TaskDeck(App):
     TITLE = "taskdeck"
     ENABLE_COMMAND_PALETTE = False
@@ -278,7 +97,8 @@ class TaskDeck(App):
     """
     BINDINGS = [("ctrl+q", "quit", "退出面板"), ("s", "start", "开始"),
                 ("enter", "conversation", "进入会话"), ("slash", "search", "搜索"),
-                ("r", "sync", "同步 PR"), ("n", "new", "新建"), ("c", "complete", "确认完成")]
+                ("r", "sync", "同步 PR"), ("n", "new", "新建"), ("c", "complete", "确认完成"),
+                ("ctrl+g", "task_list", "任务列表")]
 
     def __init__(self, project):
         super().__init__()
@@ -302,7 +122,9 @@ class TaskDeck(App):
             yield DataTable(id="tasks", cursor_type="row", zebra_stripes=True)
             with Vertical(id="detail-pane"):
                 yield Static("选择任务", id="detail-title", markup=False)
-                with TabbedContent():
+                with TabbedContent(initial="spec-tab"):
+                    with TabPane("Codex", id="codex-tab"):
+                        yield CodexPane(self.project, id="codex-pane")
                     with TabPane("任务", id="spec-tab"):
                         yield TextArea("", read_only=True, id="spec")
                     with TabPane("依赖", id="deps-tab"):
@@ -323,6 +145,9 @@ class TaskDeck(App):
         yield Footer()
 
     async def on_mount(self):
+        tabs = self.query_one(TabbedContent)
+        tabs.active = "spec-tab"
+        tabs.hide_tab("codex-tab")
         table = self.query_one("#tasks", DataTable)
         table.add_columns("ID", "任务", "状态", "PR")
         await self.reload()
@@ -395,6 +220,17 @@ class TaskDeck(App):
 
     def details(self):
         row = next((r for r in self.rows if r["id"] == self.selected), None)
+        tabs = self.query_one(TabbedContent)
+        has_session = bool(row and row["state"].get("thread_id"))
+        if has_session:
+            tabs.show_tab("codex-tab")
+        else:
+            if tabs.active == "codex-tab":
+                tabs.active = "spec-tab"
+            tabs.hide_tab("codex-tab")
+        pane = self.query_one("#codex-pane", CodexPane)
+        if tabs.active == "codex-tab" and self.selected != pane.ident:
+            self.connect_session(self.selected)
         if not row:
             self.query_one("#detail-title", Static).update("暂无任务")
             hint = "点击「新建」登记任务，或运行 taskdeck add。"
@@ -449,7 +285,7 @@ class TaskDeck(App):
         self.set_text("events", event_file.read_text()[-40000:] if event_file.exists() else "尚无运行记录")
         self.query_one("#open-pr", Button).disabled = not bool(state.get("pr"))
         self.query_one("#start", Button).disabled = row["status"] in {"unverified", "done", "delivered"} or bool(row["blockers"])
-        self.query_one("#enter", Button).disabled = False
+        self.query_one("#enter", Button).disabled = not has_session
         self.query_one("#show-diff", Button).disabled = False
         self.query_one("#complete", Button).disabled = bool(row.get("delivery_confirmed", row["status"] == "done"))
         self.query_one("#notice", Static).update("选择任务后手动开始；导入、浏览、确认完成都不会启动 Codex 任务。")
@@ -464,9 +300,28 @@ class TaskDeck(App):
     def action_search(self):
         self.query_one("#search", Input).focus()
 
+    def check_action(self, action, parameters):
+        if isinstance(self.focused, NativeTerminal) and action not in {"quit", "task_list"}:
+            return False
+        return True
+
+    def action_task_list(self):
+        self.query_one("#tasks", DataTable).focus()
+
     def action_conversation(self):
-        if self.selected:
-            self.push_screen(Conversation(self.project, self.selected))
+        if self.selected and self.project.task(self.selected).state.get("thread_id"):
+            self.query_one(TabbedContent).active = "codex-tab"
+            self.connect_session(self.selected)
+
+    @on(TabbedContent.TabActivated)
+    def session_tab_activated(self, event):
+        if (event.pane.id == "codex-tab" and event.tabbed_content.active == "codex-tab"
+                and self.selected and self.project.task(self.selected).state.get("thread_id")):
+            self.connect_session(self.selected)
+
+    @work(group="native-attach")
+    async def connect_session(self, ident):
+        await self.query_one("#codex-pane", CodexPane).select_task(ident)
 
     def action_new(self):
         self.push_screen(NewTaskModal(), self.create_task)
@@ -494,7 +349,8 @@ class TaskDeck(App):
             await asyncio.to_thread(ensure_service, self.project)
             await asyncio.to_thread(rpc, self.project, {"op": "start", "task": ident})
             await self.reload()
-            self.push_screen(Conversation(self.project, ident))
+            if self.selected == ident:
+                self.action_conversation()
         except DeckError as e:
             self.notify(str(e), severity="error", timeout=10)
             await self.reload()

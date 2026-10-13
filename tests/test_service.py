@@ -56,6 +56,38 @@ async def test_reading_and_creation_never_start_codex(project):
     assert not project.task("T001").local.exists()
 
 
+async def test_native_attach_preserves_thread_and_never_starts_a_turn(project):
+    task = project.add("T001", "one")
+    svc = service(project)
+    with pytest.raises(DeckError, match="请先手动开始"):
+        await svc.dispatch({"op": "attach", "task": task.id})
+    assert svc.codex is None
+    await svc.dispatch({"op": "start", "task": task.id})
+    original = task.state["thread_id"]
+    calls = list(svc.codex.calls)
+    svc.codex.endpoint = "unix://" + str(project.codex_socket)
+    result = await svc.dispatch({"op": "attach", "task": task.id})
+    assert result["thread_id"] == original
+    assert result["command"] == ["codex", "resume", "--remote", svc.codex.endpoint, "--no-alt-screen", "-C", task.state["worktree"], original]
+    assert svc.codex.calls == calls
+    assert task.state["thread_id"] == original
+
+
+async def test_native_attach_restores_idle_saved_thread_without_model_work(project):
+    task = project.add("T001", "one")
+    path = project.ensure_worktree(task)
+    task.save(thread_id="existing-thread", status="disconnected", error="old service disconnected")
+    svc = service(project)
+    await svc.connect()
+    svc.codex.endpoint = "unix://" + str(project.codex_socket)
+    result = await svc.dispatch({"op": "attach", "task": task.id})
+    assert result["thread_id"] == "existing-thread"
+    assert result["cwd"] == str(path)
+    assert task.state["status"] == "idle"
+    assert task.state["error"] is None
+    assert all(method not in {"thread/start", "turn/start"} for method, params in svc.codex.calls)
+
+
 async def test_manual_parallel_start_duplicate_start_steer_interrupt(project):
     a = project.add("T001", "one")
     b = project.add("T002", "two")

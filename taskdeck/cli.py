@@ -99,10 +99,14 @@ def main(argv=None):
             subprocess.run([*cmd, str(task.folder / "description.md"), str(task.folder / "task.yaml")], check=True)
             project.scan()
         elif args.command == "chat":
-            from .tui import Conversation, TaskDeck
+            from .tui import TaskDeck
             project.task(args.id)
             app = TaskDeck(project)
-            app.call_after_refresh(lambda: app.push_screen(Conversation(project, args.id)))
+            def open_chat():
+                app.selected = args.id
+                app.details()
+                app.action_conversation()
+            app.call_after_refresh(open_chat)
             app.run()
         elif args.command == "diff":
             print(project.diff(args.id))
