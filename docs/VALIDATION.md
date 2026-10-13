@@ -18,3 +18,12 @@
 - Real k12 project: 119 task folders registered, all copied descriptions byte-equal to the original documents, zero task runtime folders and no running Codex service.
 - Real k12 T119 dependency display reduced 36,414 repeated upstream path nodes to 324 visible lines by expanding shared dependencies once.
 - PR target setting was preserved while the user chooses the intended target; no k12 task was started.
+
+## Completion button visibility — 2026-10-13
+
+- Reproduced the original clipping: in an 80-column terminal, the completion button occupied x=77..87.
+- Changed the actions to a two-row, four-column grid; Confirm completion is the third button in the first row. Added c shortcut for the selected unverified task.
+- Fixed the completion dialog's collision with Textual's read-only task property.
+- Installed tests: 28 passed in 12.83s.
+- Verified with real k12 data at 80×24: T001 selected, button x=40..59 and y=17..20, enabled and fully visible; both mouse click and c open the confirmation dialog. No completion was submitted.
+- The user's existing dashboard process predates the UI update; restart only the dashboard to load the updated controls. No running k12 service or task was stopped.

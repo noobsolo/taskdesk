@@ -8,7 +8,7 @@ import webbrowser
 from rich.text import Text
 from textual import on, work
 from textual.app import App, ComposeResult
-from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.containers import Grid, Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, DataTable, Footer, Header, Input, Label, Select, Static, TabbedContent, TabPane, TextArea
 
@@ -124,13 +124,13 @@ class CompletionModal(ModalScreen):
 
     def __init__(self, task):
         super().__init__()
-        self.task = task
+        self.managed_task = task
 
     def compose(self):
         with Vertical(id="completion-box"):
-            yield Label(f"确认 {self.task.id} 已完成")
+            yield Label(f"确认 {self.managed_task.id} 已完成")
             yield Static("请确认这个提交包含本任务的真实交付。系统会检查目标基线是否已包含该提交；文档的完成文字本身不会解除依赖。", markup=False)
-            yield Input(value=self.task.definition.get("completion_candidate", ""), placeholder="实际交付/合并提交 SHA", id="completion-commit")
+            yield Input(value=self.managed_task.definition.get("completion_candidate", ""), placeholder="实际交付/合并提交 SHA", id="completion-commit")
             with Horizontal(id="completion-buttons"):
                 yield Button("确认完成", id="confirm-completion", variant="success")
                 yield Button("返回", id="cancel-completion")
@@ -272,13 +272,13 @@ class TaskDeck(App):
     TabbedContent { height: 1fr; }
     TabPane { padding: 0; }
     TextArea { border: none; background: #10171c; }
-    #actions { height: 3; }
-    #actions Button { min-width: 10; margin-right: 1; }
+    #actions { height: 6; grid-size: 4 2; grid-columns: 1fr 1fr 1fr 1fr; grid-rows: 3 3; grid-gutter: 0 1; }
+    #actions Button { min-width: 10; width: 1fr; margin: 0; }
     #notice { height: 1; color: #ddb875; padding: 0 1; }
     """
     BINDINGS = [("ctrl+q", "quit", "退出面板"), ("s", "start", "开始"),
                 ("enter", "conversation", "进入会话"), ("slash", "search", "搜索"),
-                ("r", "sync", "同步 PR"), ("n", "new", "新建")]
+                ("r", "sync", "同步 PR"), ("n", "new", "新建"), ("c", "complete", "确认完成")]
 
     def __init__(self, project):
         super().__init__()
@@ -312,15 +312,15 @@ class TaskDeck(App):
                     with TabPane("记录", id="events-tab"):
                         yield TextArea("", read_only=True, id="events")
         yield Static("新建任务后编辑 description.md 与 task.yaml，再手动开始。", id="notice", markup=False)
-        with Horizontal(id="actions"):
+        with Grid(id="actions"):
             yield Button("新建", id="new")
             yield Button("开始", id="start", variant="success")
+            yield Button("确认完成", id="complete", disabled=True)
             yield Button("进入会话", id="enter", variant="primary")
             yield Button("查看改动", id="show-diff")
             yield Button("创建 PR", id="create-pr")
             yield Button("打开 PR", id="open-pr")
             yield Button("同步", id="sync")
-            yield Button("确认完成", id="complete", disabled=True)
         yield Footer()
 
     async def on_mount(self):
@@ -536,9 +536,15 @@ class TaskDeck(App):
             self.notify(str(e), severity="error", timeout=10)
 
     def confirm_completion(self):
-        if self.selected:
+        row = next((r for r in self.rows if r["id"] == self.selected), None)
+        if row and row["status"] == "unverified":
             ident = self.selected
             self.push_screen(CompletionModal(self.project.task(ident)), lambda commit: self.record_completion(ident, commit))
+        else:
+            self.notify("请先选择一个「待核对」任务", severity="warning")
+
+    def action_complete(self):
+        self.confirm_completion()
 
     @work(group="completion")
     async def record_completion(self, ident, commit):

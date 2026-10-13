@@ -1,8 +1,8 @@
 from pathlib import Path
 
-from textual.widgets import DataTable, Input, TextArea
+from textual.widgets import Button, DataTable, Input, TextArea
 
-from taskdeck.tui import Conversation, TaskDeck
+from taskdeck.tui import CompletionModal, Conversation, TaskDeck
 
 
 async def test_mouse_keyboard_search_and_enter_do_not_start_tasks(project):
@@ -49,3 +49,28 @@ async def test_new_task_modal_and_small_terminal(project):
         assert project.task("T001").title == "新任务"
         assert app.query_one("#tasks", DataTable).row_count == 1
         assert not project.task("T001").local.exists()
+
+
+async def test_completion_button_visible_and_clickable_in_80_column_terminal(project):
+    task = project.add("T001", "已交付任务")
+    (task.folder / "task.yaml").write_text("id: T001\ntitle: 已交付任务\nsource_status: 已完成\n")
+    app = TaskDeck(project)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        for ident in ("new", "start", "complete", "enter", "show-diff", "create-pr", "open-pr", "sync"):
+            region = app.query_one("#" + ident, Button).region
+            assert region.x >= 0 and region.right <= 80
+            assert region.y >= 0 and region.bottom <= 24
+        button = app.query_one("#complete", Button)
+        assert not button.disabled
+        await pilot.click("#complete")
+        await pilot.pause()
+        assert isinstance(app.screen, CompletionModal)
+        assert app.screen.managed_task.id == "T001"
+        await pilot.press("escape")
+        await pilot.pause()
+        app.query_one("#tasks", DataTable).focus()
+        await pilot.press("c")
+        await pilot.pause()
+        assert isinstance(app.screen, CompletionModal)
+        assert not project.socket.exists()
