@@ -1,3 +1,6 @@
+import io
+import json
+
 import pytest
 
 from taskdeck.core import DeckError, git
@@ -9,6 +12,19 @@ def client(project):
     return GitHub(project)
 
 
+def test_api_requests_version_with_authoritative_merge_commit(project, monkeypatch):
+    github = client(project)
+    monkeypatch.setattr(github, "token", lambda: None)
+    commit = git(project.root, "rev-parse", "HEAD").stdout.strip()
+    def urlopen(request, timeout):
+        assert request.get_header("X-github-api-version") == "2022-11-28"
+        assert request.get_method() == "GET"
+        return io.BytesIO(json.dumps({"merge_commit_sha": commit}).encode())
+    from taskdeck import github as module
+    monkeypatch.setattr(module.urllib.request, "urlopen", urlopen)
+    assert github.api("pulls/2")["merge_commit_sha"] == commit
+
+
 def test_open_pr_does_not_unlock_dependency_and_merge_must_be_in_base(project, monkeypatch):
     a = project.add("T001", "one")
     b = project.add("T002", "two", ["T001"])
@@ -17,6 +33,7 @@ def test_open_pr_does_not_unlock_dependency_and_merge_must_be_in_base(project, m
     assert github.repo == "demo"
     pr = {"number": 1, "html_url": "https://github.com/example/demo/pull/1", "state": "open", "merged_at": None}
     monkeypatch.setattr(github, "find", lambda branch: pr)
+    monkeypatch.setattr(github, "api", lambda *args, **kwargs: pr)
     github.sync(a)
     assert project.blockers(b)
     pr.update(state="closed", merged_at="2026-10-13", merge_commit_sha="a" * 40)
@@ -66,3 +83,27 @@ def test_existing_pr_is_reused_after_push(project, monkeypatch):
     result = github.create(task, body="Implementation and validation results")
     assert result["number"] == 9
     assert len(calls) == 1
+
+
+def test_session_reported_existing_pr_is_verified_and_synced(project, monkeypatch):
+    task = project.add("T003", "query contract")
+    path = project.ensure_worktree(task)
+    github = client(project)
+    delivery = path / "tasks/T003/delivery.md"
+    delivery.parent.mkdir(parents=True)
+    delivery.write_text("Reused https://github.com/example/demo/pull/2")
+    merge_commit = git(project.root, "rev-parse", "HEAD").stdout.strip()
+    pr = {"number": 2, "html_url": "https://github.com/example/demo/pull/2", "state": "closed", "merged_at": "2026-10-13", "merge_commit_sha": merge_commit,
+          "title": "Query contract", "base": {"ref": "main"}, "head": {"ref": "codex/t003-query-contract"}}
+    monkeypatch.setattr(github, "find", lambda branch: None)
+    calls = []
+    def api(endpoint, *args, **kwargs):
+        calls.append(endpoint)
+        return pr
+    monkeypatch.setattr(github, "api", api)
+    github.sync(task)
+    assert task.state["pr"]["number"] == 2
+    assert task.state["completed_commit"] == merge_commit
+    assert project.snapshot()["tasks"][0]["status"] == "done"
+    github.sync(task)
+    assert calls == ["pulls/2", "pulls/2"]

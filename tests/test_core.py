@@ -54,7 +54,7 @@ def test_dependency_requires_commit_in_actual_worktree(project):
     commit = git(project.root, "rev-parse", "HEAD").stdout.strip()
     a.save(pr={"state": "open"}, status="idle")
     assert project.blockers(b)
-    project.record_completion("T001", commit)
+    project.record_completion("T001", "HEAD")
     assert not project.blockers(b)
     assert project.blockers(b, ref="refs/heads/old")
     path = project.ensure_worktree(b)
@@ -116,3 +116,50 @@ def test_large_task_graph(project):
     assert sum(r["status"] == "ready" for r in rows) == 1
     assert sum(r["status"] == "blocked" for r in rows) == 119
     assert not project.socket.exists()
+
+
+def test_running_session_can_confirm_delivery_without_unlocking_unmerged_code(project):
+    task = project.add("T001", "one")
+    downstream = project.add("T002", "two", ["T001"])
+    path = project.ensure_worktree(task)
+    (path / "feature.py").write_text("implemented = True\n")
+    git(path, "add", ".")
+    git(path, "commit", "-m", "task delivery")
+    commit = git(path, "rev-parse", "HEAD").stdout.strip()
+    task.save(status="running", thread_id="same-session", turn_id="active-turn")
+    assert task.completion_candidate() == commit
+    project.record_completion("T001", "HEAD")
+    state = task.state
+    assert state["delivery_status"] == "completed"
+    assert state["delivery_commit"] == commit
+    assert state["status"] == "running"
+    assert state["thread_id"] == "same-session" and state["turn_id"] == "active-turn"
+    row = project.snapshot()["tasks"][0]
+    assert row["status"] == "delivered" and row["execution_status"] == "running"
+    assert project.blockers(downstream)
+    git(project.root, "merge", "--ff-only", "task/T001")
+    assert project.snapshot()["tasks"][0]["status"] == "done"
+    assert not project.blockers(downstream)
+    assert task.state["status"] == "running"
+
+
+def test_delivery_commit_must_belong_to_task_branch(project):
+    task = project.add("T001", "one")
+    project.ensure_worktree(task)
+    (project.root / "unrelated.py").write_text("unrelated = True\n")
+    git(project.root, "add", "unrelated.py")
+    git(project.root, "commit", "-m", "unrelated change")
+    commit = git(project.root, "rev-parse", "HEAD").stdout.strip()
+    with pytest.raises(DeckError, match="不属于"):
+        project.record_completion("T001", commit)
+
+
+def test_init_in_feature_branch_chooses_existing_main(tmp_path):
+    root = tmp_path / "feature-root"
+    root.mkdir()
+    git(root, "init", "-b", "main")
+    git(root, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--allow-empty", "-m", "baseline")
+    git(root, "checkout", "-b", "codex/current-task")
+    project = Project.init(root)
+    assert project.base == "main"
+    assert git(root, "symbolic-ref", "--short", "HEAD").stdout.strip() == "codex/current-task"

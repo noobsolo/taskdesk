@@ -130,3 +130,17 @@ async def test_stale_turn_completion_cannot_stop_new_turn(project):
     await svc.dispatch({"op": "start", "task": task.id})
     await svc.event({"method": "turn/completed", "params": {"threadId": task.state["thread_id"], "turn": {"id": "old-turn", "status": "failed"}}})
     assert task.state["status"] == "running"
+
+
+async def test_turn_completion_preserves_manual_delivery_confirmation(project):
+    task = project.add("T001", "one")
+    svc = service(project)
+    await svc.dispatch({"op": "start", "task": task.id})
+    commit = git(project.root, "rev-parse", "HEAD").stdout.strip()
+    project.record_completion(task.id, commit)
+    state = task.state
+    assert state["turn_id"]
+    await svc.event({"method": "turn/completed", "params": {"threadId": state["thread_id"], "turn": {"id": state["turn_id"], "status": "completed"}}})
+    assert task.state["status"] == "idle"
+    assert task.state["delivery_status"] == "completed"
+    assert project.snapshot()["tasks"][0]["status"] == "done"

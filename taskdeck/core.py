@@ -97,6 +97,7 @@ LABELS = {"ready": "可开始", "blocked": "被阻塞", "preparing": "准备中"
           "interrupted": "已中断", "disconnected": "需恢复", "failed": "失败",
           "done": "已入基线"}
 LABELS["unverified"] = "待核对"
+LABELS["delivered"] = "已完成，待入基线"
 ACTIVE = {"preparing", "running", "waiting"}
 
 
@@ -130,6 +131,15 @@ class Task:
     def description(self):
         file = self.folder / "description.md"
         return file.read_text() if file.exists() else ""
+
+    def completion_candidate(self):
+        state = self.state
+        if state.get("delivery_commit"):
+            return state["delivery_commit"]
+        path = state.get("worktree")
+        if path and Path(path).exists():
+            return git(path, "rev-parse", "HEAD").stdout.strip()
+        return self.definition.get("completion_candidate", "")
 
 
 class Project:
@@ -179,7 +189,11 @@ class Project:
         if (common / "taskdeck" / "project.json").exists() or (root / ".taskctl.yaml").exists():
             return cls.discover(cwd)
         task_root = inside(root, tasks_dir)
-        branch = base or git(root, "symbolic-ref", "--short", "HEAD", check=False).stdout.strip() or "main"
+        remote_head = git(root, "symbolic-ref", "--short", "refs/remotes/origin/HEAD", check=False).stdout.strip()
+        default_branch = remote_head.removeprefix("origin/") if remote_head else ""
+        if not default_branch:
+            default_branch = next((name for name in ("main", "master") if git(root, "show-ref", "--verify", f"refs/heads/{name}", check=False).returncode == 0), "")
+        branch = base or default_branch or git(root, "symbolic-ref", "--short", "HEAD", check=False).stdout.strip() or "main"
         config = {"version": 1, "project_id": str(uuid.uuid4()), "tasks_dir": tasks_dir,
                   "target_branch": branch, "remote": "origin", "codex_command": ["codex", "app-server"]}
         if not re.fullmatch(r"[A-Za-z0-9_./-]+", tasks_dir) or any(c in tasks_dir for c in "*?["):
@@ -284,7 +298,7 @@ class Project:
         result = []
         for dep in task.deps:
             state = tasks[dep].state
-            commit = state.get("completed_commit") or tasks[dep].definition.get("completed_commit")
+            commit = state.get("completed_commit") or state.get("delivery_commit") or tasks[dep].definition.get("completed_commit")
             if not self.has_commit(commit, ref):
                 result.append(f"{dep} 尚未交付到当前基线")
         return result
@@ -296,7 +310,7 @@ class Project:
         included = {}
         for task in tasks.values():
             state = task.state
-            commit = state.get("completed_commit") or task.definition.get("completed_commit")
+            commit = state.get("completed_commit") or state.get("delivery_commit") or task.definition.get("completed_commit")
             included[task.id] = self.has_commit(commit) if commit else False
         for task in tasks.values():
             state = task.state
@@ -306,11 +320,15 @@ class Project:
                 status = "unverified"
             if included[task.id]:
                 status = "done"
+            elif state.get("delivery_status") == "completed":
+                status = "delivered"
             elif status == "done":
                 status = "blocked" if blockers else "idle"
             rows.append({"id": task.id, "title": task.title, "deps": task.deps,
                          "folder": str(task.folder), "state": state, "status": status,
                          "label": LABELS.get(status, status), "blockers": blockers,
+                         "delivery_confirmed": included[task.id] or state.get("delivery_status") == "completed",
+                         "execution_status": state.get("status", "idle") if state.get("thread_id") else "not_started",
                          "unlocks": sum(task.id in t.deps for t in tasks.values()),
                          "included": included[task.id]})
         return {"root": str(self.root), "base": self.base, "tasks": rows}
@@ -350,6 +368,7 @@ class Project:
                 "遵守工作目录中的 AGENTS.md。完成实现及必要验证后，记录真实结果，"
                 f"将交付记录写入 {rel}/delivery.md，提交并推送当前分支、创建 PR。"
                 f"可以使用 taskdeck pr {task.id} 创建或复用 PR；该命令读取 delivery.md。"
+                "PR 由本任务的 Codex 对话负责创建或更新，无需用户在任务面板另行触发。"
                 "如果本分支已有 PR，更新原 PR。不要合并 PR，不要启动其他任务。"
                 "失败、缺少凭证或验证未通过时明确报告，不要声称成功。\n\n"
                 f"原始任务文件：{task.definition.get('source', rel + '/description.md')}。"
@@ -370,10 +389,15 @@ class Project:
 
     def record_completion(self, ident, commit):
         task = self.task(ident)
-        full = git(self.root, "rev-parse", "--verify", commit + "^{commit}").stdout.strip()
-        if not self.has_commit(full):
-            raise DeckError("该提交尚未包含在目标基线中，不能解除依赖")
-        if task.state.get("status") in ACTIVE:
-            raise DeckError("任务正在运行，不能标记完成")
-        task.save(completed_commit=full, status="done")
-        task.event("completion", commit=full)
+        state = task.state
+        path = state.get("worktree")
+        commit_root = Path(path) if path and Path(path).exists() else self.root
+        full = git(commit_root, "rev-parse", "--verify", "--end-of-options", commit + "^{commit}").stdout.strip()
+        if state.get("branch") and not self.has_commit(full, "refs/heads/" + state["branch"]):
+            raise DeckError("提交不属于该任务分支，请核对实际交付提交")
+        updates = {"delivery_status": "completed", "delivery_commit": full}
+        if self.has_commit(full):
+            updates["completed_commit"] = full
+        # Delivery confirmation never changes the thread or current turn state.
+        task.save(**updates)
+        task.event("completion", commit=full, included=self.has_commit(full))

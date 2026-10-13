@@ -129,8 +129,8 @@ class CompletionModal(ModalScreen):
     def compose(self):
         with Vertical(id="completion-box"):
             yield Label(f"确认 {self.managed_task.id} 已完成")
-            yield Static("请确认这个提交包含本任务的真实交付。系统会检查目标基线是否已包含该提交；文档的完成文字本身不会解除依赖。", markup=False)
-            yield Input(value=self.managed_task.definition.get("completion_candidate", ""), placeholder="实际交付/合并提交 SHA", id="completion-commit")
+            yield Static("请确认这个提交包含本任务的真实交付。确认后会话仍可继续；代码进入目标基线后，才解除后续依赖。", markup=False)
+            yield Input(value=self.managed_task.completion_candidate(), placeholder="实际交付/合并提交 SHA", id="completion-commit")
             with Horizontal(id="completion-buttons"):
                 yield Button("确认完成", id="confirm-completion", variant="success")
                 yield Button("返回", id="cancel-completion")
@@ -296,7 +296,7 @@ class TaskDeck(App):
         with Horizontal(id="filters"):
             yield Input(placeholder="搜索 ID / 标题 / 依赖", id="search")
             yield Select([("全部任务", "all"), ("可开始", "ready"), ("运行中", "running"),
-                          ("等你处理", "waiting"), ("待核对", "unverified"), ("被阻塞", "blocked"), ("有 PR", "pr")], value="all", allow_blank=False, id="filter")
+                          ("等你处理", "waiting"), ("待核对", "unverified"), ("待入基线", "delivered"), ("被阻塞", "blocked"), ("有 PR", "pr")], value="all", allow_blank=False, id="filter")
             yield Button("导入任务", id="import")
         with Horizontal(id="main"):
             yield DataTable(id="tasks", cursor_type="row", zebra_stripes=True)
@@ -318,7 +318,6 @@ class TaskDeck(App):
             yield Button("确认完成", id="complete", disabled=True)
             yield Button("进入会话", id="enter", variant="primary")
             yield Button("查看改动", id="show-diff")
-            yield Button("创建 PR", id="create-pr")
             yield Button("打开 PR", id="open-pr")
             yield Button("同步", id="sync")
         yield Footer()
@@ -338,6 +337,8 @@ class TaskDeck(App):
             data = await asyncio.to_thread(snapshot, self.project)
             self.rows = data["tasks"]
             counts = {s: sum(r["status"] == s for r in self.rows) for s in ("ready", "running", "waiting", "done")}
+            counts["running"] = sum(r.get("execution_status") in {"running", "preparing"} for r in self.rows)
+            counts["waiting"] = sum(r.get("execution_status") == "waiting" for r in self.rows)
             summary = f"{self.project.root.name}  /  {self.project.base}     {len(self.rows)} 个任务 · 可开始 {counts['ready']} · 运行 {counts['running']} · 等你 {counts['waiting']} · 完成 {counts['done']}"
             self.query_one("#summary", Static).update(summary)
             self.draw_table()
@@ -351,7 +352,9 @@ class TaskDeck(App):
         selected_filter = self.query_one("#filter", Select).value
         rows = [r for r in self.rows if query in (r["id"] + " " + r["title"] + " " + " ".join(r["deps"])).casefold()]
         if selected_filter == "running":
-            rows = [r for r in rows if r["status"] in {"running", "waiting", "preparing"}]
+            rows = [r for r in rows if r.get("execution_status", r["status"]) in {"running", "waiting", "preparing"}]
+        elif selected_filter == "waiting":
+            rows = [r for r in rows if r.get("execution_status", r["status"]) == "waiting"]
         elif selected_filter == "pr":
             rows = [r for r in rows if r["state"].get("pr")]
         elif selected_filter != "all":
@@ -403,7 +406,7 @@ class TaskDeck(App):
             for ident in ("spec", "deps", "events"):
                 self.query_one("#" + ident, TextArea).load_text(hint if ident == "spec" else "")
             self.query_one("#notice", Static).update(hint)
-            for ident in ("start", "enter", "show-diff", "create-pr", "open-pr", "complete"):
+            for ident in ("start", "enter", "show-diff", "open-pr", "complete"):
                 self.query_one("#" + ident, Button).disabled = True
             return
         self.query_one("#detail-title", Static).update(f"{row['id']}  {row['title']}  ·  {row['label']}")
@@ -411,6 +414,10 @@ class TaskDeck(App):
         state = row["state"]
         text = task.description() + "\n\n验收要求\n" + "\n".join("□ " + x for x in task.definition.get("acceptance", []))
         text += f"\n\n任务目录：{task.folder}\n分支：{state.get('branch', '—')}\nSession：{state.get('thread_id', '—')}"
+        if state.get("thread_id"):
+            text += "\n会话状态：" + LABELS.get(row.get("execution_status"), row.get("execution_status", "—"))
+        if state.get("delivery_commit"):
+            text += f"\n已确认交付：{state['delivery_commit']}"
         if task.definition.get("source"):
             text += f"\n原始任务：{task.definition['source']}\n原文状态：{task.definition.get('source_status', '—')}"
         if row["status"] == "unverified":
@@ -441,11 +448,10 @@ class TaskDeck(App):
         event_file = task.local / "events.jsonl"
         self.set_text("events", event_file.read_text()[-40000:] if event_file.exists() else "尚无运行记录")
         self.query_one("#open-pr", Button).disabled = not bool(state.get("pr"))
-        self.query_one("#start", Button).disabled = row["status"] in {"unverified", "done"} or bool(row["blockers"])
+        self.query_one("#start", Button).disabled = row["status"] in {"unverified", "done", "delivered"} or bool(row["blockers"])
         self.query_one("#enter", Button).disabled = False
         self.query_one("#show-diff", Button).disabled = False
-        self.query_one("#create-pr", Button).disabled = not state.get("worktree")
-        self.query_one("#complete", Button).disabled = row["status"] != "unverified"
+        self.query_one("#complete", Button).disabled = bool(row.get("delivery_confirmed", row["status"] == "done"))
         self.query_one("#notice", Static).update("选择任务后手动开始；导入、浏览、确认完成都不会启动 Codex 任务。")
 
     def set_text(self, ident, text):
@@ -514,18 +520,6 @@ class TaskDeck(App):
             except DeckError as e:
                 self.notify(str(e), severity="error")
 
-    @work(group="pr")
-    async def create_pr(self):
-        if not self.selected:
-            return
-        try:
-            await asyncio.to_thread(ensure_service, self.project)
-            result = await asyncio.to_thread(rpc, self.project, {"op": "pr", "task": self.selected})
-            self.notify(result["url"], timeout=10)
-            await self.reload()
-        except DeckError as e:
-            self.notify(str(e), severity="error", timeout=10)
-
     @work(exclusive=True, group="import")
     async def import_tasks(self):
         try:
@@ -537,11 +531,11 @@ class TaskDeck(App):
 
     def confirm_completion(self):
         row = next((r for r in self.rows if r["id"] == self.selected), None)
-        if row and row["status"] == "unverified":
+        if row and not row.get("delivery_confirmed", row["status"] == "done"):
             ident = self.selected
             self.push_screen(CompletionModal(self.project.task(ident)), lambda commit: self.record_completion(ident, commit))
         else:
-            self.notify("请先选择一个「待核对」任务", severity="warning")
+            self.notify("请先选择一个尚未确认完成的任务", severity="warning")
 
     def action_complete(self):
         self.confirm_completion()
@@ -551,9 +545,12 @@ class TaskDeck(App):
         if not commit:
             return
         try:
-            await asyncio.to_thread(ensure_service, self.project)
-            await asyncio.to_thread(rpc, self.project, {"op": "complete", "task": ident, "commit": commit})
-            self.notify("已确认交付提交在目标基线中，后续任务等待你手动开始")
+            # State writes use Task.save's file lock; no daemon restart, new
+            # model turn, or turn interruption is needed to confirm delivery.
+            await asyncio.to_thread(self.project.record_completion, ident, commit)
+            task = self.project.task(ident)
+            included = self.project.has_commit(task.state["delivery_commit"])
+            self.notify("已确认完成，后续任务可手动开始" if included else "已确认开发完成，等待合入目标分支；会话可以继续", timeout=8)
             await self.reload()
         except DeckError as e:
             self.notify(str(e), severity="error", timeout=10)
@@ -561,7 +558,7 @@ class TaskDeck(App):
     @on(Button.Pressed)
     def buttons(self, event):
         mapping = {"new": self.action_new, "start": self.action_start, "enter": self.action_conversation,
-                   "show-diff": self.show_diff, "create-pr": self.create_pr, "sync": self.action_sync,
+                   "show-diff": self.show_diff, "sync": self.action_sync,
                    "import": self.import_tasks, "complete": self.confirm_completion}
         if event.button.id in mapping:
             mapping[event.button.id]()

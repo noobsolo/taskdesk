@@ -26,7 +26,7 @@ def parser():
     sub = p.add_subparsers(dest="command")
     init = sub.add_parser("init", help="初始化当前 Git 项目；不创建或运行任务")
     init.add_argument("--tasks-dir", default="tasks")
-    init.add_argument("--base", help="PR 目标分支；默认当前分支")
+    init.add_argument("--base", help="PR 目标分支；默认仓库主分支")
     add = sub.add_parser("add", help="创建任务文件夹")
     add.add_argument("id")
     add.add_argument("title")
@@ -47,11 +47,11 @@ def parser():
     send = sub.add_parser("send", help="运行中追加指令；空闲时开始下一轮")
     send.add_argument("id")
     send.add_argument("message")
-    complete = sub.add_parser("complete", help="手动登记已入基线的交付提交")
+    complete = sub.add_parser("complete", help="确认开发完成，登记交付提交；会话可以继续")
     complete.add_argument("id")
     complete.add_argument("--commit", required=True)
     sub.add_parser("sync", help="刷新远端目标分支与 PR 状态；不启动任务")
-    pr = sub.add_parser("pr", help="创建/复用该任务的 GitHub PR")
+    pr = sub.add_parser("pr", help="供 Codex 会话调用的 PR 交付工具")
     pr.add_argument("id")
     pr.add_argument("--title")
     pr.add_argument("--body-file", type=Path)
@@ -107,8 +107,8 @@ def main(argv=None):
         elif args.command == "diff":
             print(project.diff(args.id))
         elif args.command == "complete":
-            ensure_service(project)
-            emit(rpc(project, {"op": "complete", "task": args.id, "commit": args.commit}))
+            project.record_completion(args.id, args.commit)
+            emit(project.task(args.id).state)
         elif args.command == "service":
             if args.action == "status":
                 emit({"running": online(project), "socket": str(project.socket)})

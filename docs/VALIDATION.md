@@ -27,3 +27,14 @@
 - Installed tests: 28 passed in 12.83s.
 - Verified with real k12 data at 80×24: T001 selected, button x=40..59 and y=17..20, enabled and fully visible; both mouse click and c open the confirmation dialog. No completion was submitted.
 - The user's existing dashboard process predates the UI update; restart only the dashboard to load the updated controls. No running k12 service or task was stopped.
+
+## Delivery completion and session-owned PRs — 2026-10-13
+
+- Installed full suite: 35 passed in 14.82s. Regression coverage includes confirming an active session without changing its thread/turn, preserving confirmation after turn completion, and enforcing actual baseline ancestry before unlocking dependencies.
+- Removed the dashboard Create PR button. Task prompts instruct the Codex session to create/update its PR; the CLI PR helper remains available for the session.
+- Existing PRs reported in a task worktree's delivery.md are checked against the repository and task identity, including reused PR heads different from the manager's task branch.
+- GitHub API 2026-03-10 removes merge_commit_sha. Requests now explicitly use the supported 2022-11-28 contract so sync records the actual merge commit. Source: https://docs.github.com/en/rest/about-the-rest-api/breaking-changes
+- Fresh k12 GitHub read confirmed T003 PR #2 merged into main, commit 69eba0b470d577c6401b6cd9397a7824d63377cd. Fetched baseline contains that commit; task shows 已入基线.
+- Corrected k12 target_branch from the previous feature branch to main. The source checkout and task worktree were not switched or reset. Reloaded only the idle service; the saved T003 thread was preserved and no model turn or PR was created.
+- Verified actual k12 UI data at 80×24: T003 selected, all action buttons visible, no Create PR widget, original session shown and Enter enabled. Confirm completion is disabled for this task because its PR is already in the baseline.
+- Existing dashboard processes need Ctrl+Q and taskdeck to load the changed controls; exiting the dashboard preserves the task service and sessions.

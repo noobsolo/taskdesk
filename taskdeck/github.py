@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 import re
 import subprocess
 import urllib.error
@@ -37,7 +38,9 @@ class GitHub:
         return None
 
     def api(self, path, method="GET", body=None):
-        headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2026-03-10", "User-Agent": "taskdeck/0.1"}
+        # 2026-03-10 removed merge_commit_sha. Use the supported version that
+        # returns the authoritative delivery commit for ancestry checks.
+        headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "taskdeck/0.1"}
         token = self.token()
         if token:
             headers["Authorization"] = "Bearer " + token
@@ -63,13 +66,36 @@ class GitHub:
     @staticmethod
     def summary(pr):
         return {"number": pr["number"], "url": pr["html_url"], "state": "merged" if pr.get("merged_at") else pr["state"],
-                "merge_commit": pr.get("merge_commit_sha") if pr.get("merged_at") else None}
+                "merge_commit": pr.get("merge_commit_sha") if pr.get("merged_at") else None,
+                "base": pr.get("base", {}).get("ref"), "head": pr.get("head", {}).get("ref")}
+
+    def find_task(self, task):
+        state = task.state
+        known = (state.get("pr") or {}).get("number")
+        if isinstance(known, int) and known > 0:
+            return self.api(f"pulls/{known}")
+        pr = self.find(state["branch"])
+        if pr:
+            return pr
+        # Sessions may reuse an existing PR with a different head branch.
+        path = state.get("worktree")
+        if path:
+            delivery = Path(path) / task.folder.relative_to(self.project.root) / "delivery.md"
+            if delivery.exists():
+                prefix = f"https://github.com/{self.owner}/{self.repo}/pull/"
+                numbers = list(dict.fromkeys(re.findall(re.escape(prefix) + r"(\d+)\b", delivery.read_text())))
+                for number in numbers:
+                    candidate = self.api(f"pulls/{int(number)}")
+                    identity = candidate.get("title", "") + " " + candidate.get("head", {}).get("ref", "")
+                    if re.search(r"(?<![A-Za-z0-9])" + re.escape(task.id) + r"(?!\d)", identity, re.I):
+                        return candidate
+        return None
 
     def sync(self, task):
         state = task.state
         if not state.get("branch"):
             return None
-        pr = self.find(state["branch"])
+        pr = self.find_task(task)
         if pr:
             updates = {"pr": self.summary(pr)}
             if pr.get("merged_at") and pr.get("merge_commit_sha"):
@@ -90,16 +116,24 @@ class GitHub:
             raise DeckError("工作目录还有未提交修改，请先完成提交")
         if int(git(path, "rev-list", "--count", self.project.base_ref() + "..HEAD").stdout.strip()) == 0:
             raise DeckError("任务分支没有新的提交")
-        existing = self.find(branch)
+        existing = self.find_task(task)
         if existing and existing["state"] != "open":
             raise DeckError("该分支已有关闭/合并的 PR，请核对任务交付状态")
         delivery = task.folder.relative_to(self.project.root) / "delivery.md"
         if body is None:
-            file = __import__("pathlib").Path(path) / delivery
+            file = Path(path) / delivery
             if not file.exists():
                 raise DeckError("缺少 delivery.md，请先记录实现、验证结果和未验证项")
             body = file.read_text()
-        git(path, "push", "-u", self.project.config.get("remote", "origin"), branch, timeout=90)
+        head = existing.get("head", {}) if existing else {}
+        head_ref = head.get("ref", branch)
+        if head_ref != branch:
+            head_repo = (head.get("repo") or {}).get("full_name")
+            if head_repo != f"{self.owner}/{self.repo}":
+                raise DeckError("原 PR 的 head 位于其他仓库，请由 Codex 会话核对推送目标")
+            git(path, "push", self.project.config.get("remote", "origin"), f"HEAD:refs/heads/{head_ref}", timeout=90)
+        else:
+            git(path, "push", "-u", self.project.config.get("remote", "origin"), branch, timeout=90)
         pr = existing or self.api("pulls", "POST", {"title": title or f"{task.id}: {task.title}", "body": body,
                                                  "head": branch, "base": self.project.base})
         task.save(pr=self.summary(pr))

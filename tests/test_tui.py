@@ -57,7 +57,7 @@ async def test_completion_button_visible_and_clickable_in_80_column_terminal(pro
     app = TaskDeck(project)
     async with app.run_test(size=(80, 24)) as pilot:
         await pilot.pause()
-        for ident in ("new", "start", "complete", "enter", "show-diff", "create-pr", "open-pr", "sync"):
+        for ident in ("new", "start", "complete", "enter", "show-diff", "open-pr", "sync"):
             region = app.query_one("#" + ident, Button).region
             assert region.x >= 0 and region.right <= 80
             assert region.y >= 0 and region.bottom <= 24
@@ -74,3 +74,18 @@ async def test_completion_button_visible_and_clickable_in_80_column_terminal(pro
         await pilot.pause()
         assert isinstance(app.screen, CompletionModal)
         assert not project.socket.exists()
+
+
+async def test_normal_session_can_open_completion_and_has_no_manual_pr_button(project):
+    task = project.add("T003", "普通开发任务")
+    task.save(status="idle", thread_id="existing-session")
+    app = TaskDeck(project)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        assert not app.query("#create-pr")
+        assert not app.query_one("#complete", Button).disabled
+        await pilot.click("#complete")
+        await pilot.pause()
+        assert isinstance(app.screen, CompletionModal)
+        assert app.screen.managed_task.id == "T003"
+        assert task.state["thread_id"] == "existing-session"

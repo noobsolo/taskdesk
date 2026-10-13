@@ -207,6 +207,8 @@ class Service:
             return task.state
         if task.state.get("completed_commit") and self.project.has_commit(task.state["completed_commit"]):
             raise DeckError("任务已交付到基线")
+        if task.state.get("delivery_status") == "completed":
+            raise DeckError("任务已确认完成。如需审查或调整，请进入原会话发送消息。")
         if task.definition.get("source_status") == "已完成":
             raise DeckError("原文档标记已完成，请先点击「确认完成」核对交付提交；如需重做，先修改 task.yaml 的 source_status。")
         task.save(status="preparing", error=None)
@@ -427,12 +429,19 @@ def ensure_service(project):
 def snapshot(project):
     if project.socket.exists():
         try:
-            return rpc(project, {"op": "snapshot"}, timeout=5)
+            rpc(project, {"op": "snapshot"}, timeout=5)
+            # Project state files are current even when a running daemon was
+            # started with an earlier UI/schema version. Keep existing turns alive.
+            result = project.snapshot()
+            result["service"] = True
+            return result
         except DeckError:
             pass
     result = project.snapshot()
     result["service"] = False
     for row in result["tasks"]:
+        if row.get("execution_status") in ACTIVE:
+            row["execution_status"] = "disconnected"
         if row["status"] in ACTIVE:
             row.update(status="disconnected", label="需恢复")
     return result
