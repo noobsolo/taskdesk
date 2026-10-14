@@ -5,6 +5,7 @@ import asyncio
 import codecs
 import errno
 import fcntl
+from functools import lru_cache
 import os
 from pathlib import Path
 import pty
@@ -12,6 +13,7 @@ import struct
 import subprocess
 import sys
 import termios
+import time
 
 import pyte
 from rich.style import Style
@@ -60,10 +62,62 @@ def key_bytes(key, character=None):
 class TerminalScreen(pyte.HistoryScreen):
     def __init__(self, columns, lines, write):
         self.write = write
+        self._history_serial = 0
+        self._view_start = None
+        self._view_rows = None
         super().__init__(columns, lines, history=2000)
 
     def write_process_input(self, data):
         self.write(data.encode())
+
+    def _reset_history(self):
+        super()._reset_history()
+        self._history_serial = 0
+        self.return_to_live()
+
+    def index(self):
+        _, bottom = self.margins or (0, self.lines - 1)
+        if self.cursor.y == bottom:
+            self._history_serial += 1
+        super().index()
+
+    @property
+    def scroll_offset(self):
+        return 0 if self._view_start is None else self._history_serial - self._view_start
+
+    def viewport_rows(self):
+        # Never page the live pyte buffer: cursor reports, output and resize
+        # must keep using the real CLI screen while the user reads history.
+        if self._view_rows is not None:
+            return self._view_rows
+        return tuple(self.buffer[y] for y in range(self.lines))
+
+    def return_to_live(self):
+        changed = self._view_start is not None
+        self._view_start = None
+        self._view_rows = None
+        return changed
+
+    def scroll_history(self, lines):
+        history = list(self.history.top)
+        oldest = self._history_serial - len(history)
+        previous = self._history_serial if self._view_start is None else self._view_start
+        start = max(oldest, min(previous + lines, self._history_serial))
+        if start == self._history_serial:
+            return self.return_to_live()
+        rows = history + [self.buffer[y] for y in range(self.lines)]
+        first = start - oldest
+        # Only copy the visible rows, preserving the view even if the CLI
+        # edits its live rows or evicts older history while we're browsing.
+        self._view_rows = tuple(tuple(row[x] for x in range(self.columns))
+                                for row in rows[first:first + self.lines])
+        self._view_start = start
+        return start != previous
+
+    def resize(self, lines=None, columns=None):
+        super().resize(lines=lines, columns=columns)
+        if self._view_start is not None:
+            self.scroll_history(0)
 
 
 class PtySession:
@@ -77,6 +131,7 @@ class PtySession:
         self.decoder = codecs.getincrementaldecoder("utf-8")("replace")
         self.closed = False
         self.exit_code = None
+        self._pty_size = None
         self.resize(columns, lines)
         env = dict(os.environ, TERM="xterm-256color", COLORTERM="truecolor")
         env.pop("NO_COLOR", None)
@@ -97,25 +152,38 @@ class PtySession:
 
     def resize(self, columns, lines):
         columns, lines = max(1, columns), max(1, lines)
+        if self._pty_size == (columns, lines):
+            return False
         self.screen.resize(lines=lines, columns=columns)
         fcntl.ioctl(self.master, termios.TIOCSWINSZ, struct.pack("HHHH", lines, columns, 0, 0))
+        self._pty_size = (columns, lines)
+        return True
 
     def read(self):
+        changed = False
+        deadline = time.monotonic() + 0.004
         try:
-            while True:
-                data = os.read(self.master, 65536)
+            # A busy child must yield to input and screen updates. Limit both
+            # chunk size and callback work; unread bytes remain in the PTY.
+            for _ in range(4):
+                data = os.read(self.master, 8192)
                 if not data:
                     self.finish()
                     return
                 self.stream.feed(self.decoder.decode(data))
-                self.changed()
+                changed = True
+                if time.monotonic() >= deadline:
+                    break
         except BlockingIOError:
-            return
+            pass
         except OSError as e:
             if e.errno == errno.EIO:
                 self.finish()
             else:
                 raise
+        finally:
+            if changed:
+                self.changed()
 
     def write(self, data):
         if self.closed:
@@ -167,21 +235,41 @@ def terminal_color(value):
     return value
 
 
+@lru_cache(maxsize=512)
+def terminal_style(fg, bg, bold, italics, underscore, reverse, strikethrough):
+    return Style(color=terminal_color(fg), bgcolor=terminal_color(bg), bold=bold,
+                 italic=italics, underline=underscore, reverse=reverse, strike=strikethrough)
+
+
+@lru_cache(maxsize=1024)
+def line_text(cells, cursor_x):
+    result = Text()
+    run, previous = [], None
+    for x, char in enumerate(cells):
+        if not char.data:
+            continue
+        attrs = (char.fg, char.bg, char.bold, char.italics, char.underscore,
+                 bool(char.reverse) ^ (x == cursor_x), char.strikethrough)
+        if run and attrs != previous:
+            result.append("".join(run), terminal_style(*previous))
+            run = []
+        run.append(char.data)
+        previous = attrs
+    if run:
+        result.append("".join(run), terminal_style(*previous))
+    return result
+
+
 def screen_text(screen):
+    # Keep Textual's established full-render path, including its sizing,
+    # cropping, default styles and compositor. Only text construction changes.
     result = Text(no_wrap=True, overflow="crop")
-    for y in range(screen.lines):
+    for y, row in enumerate(screen.viewport_rows()):
         if y:
             result.append("\n")
-        for x in range(screen.columns):
-            char = screen.buffer[y][x]
-            if not char.data:
-                continue
-            color = terminal_color(char.fg)
-            background = terminal_color(char.bg)
-            cursor = not screen.cursor.hidden and (x, y) == (screen.cursor.x, screen.cursor.y)
-            style = Style(color=color, bgcolor=background, bold=char.bold, italic=char.italics,
-                          underline=char.underscore, reverse=bool(char.reverse) ^ cursor, strike=char.strikethrough)
-            result.append(char.data, style)
+        cells = tuple(row[x] for x in range(screen.columns))
+        cursor_x = screen.cursor.x if not screen.scroll_offset and not screen.cursor.hidden and y == screen.cursor.y else -1
+        result.append_text(line_text(cells, cursor_x))
     return result
 
 
@@ -206,14 +294,14 @@ class NativeTerminal(Widget, can_focus=True):
         self.dirty = True
 
     def redraw(self):
-        if self.dirty:
+        if self.dirty and self.is_on_screen:
             self.dirty = False
             self.refresh()
 
     def on_resize(self, event):
         if self.session and not self.session.closed and event.size.width and event.size.height:
-            self.session.resize(event.size.width, event.size.height)
-            self.mark_dirty()
+            if self.session.resize(event.size.width, event.size.height):
+                self.mark_dirty()
 
     def render(self):
         return screen_text(self.session.screen) if self.session else Text("正在连接 Codex…")
@@ -224,12 +312,17 @@ class NativeTerminal(Widget, can_focus=True):
         event.stop()
         event.prevent_default()
         if self.session:
-            self.session.screen.next_page()
+            if self.session.screen.return_to_live():
+                self.mark_dirty()
+                self.redraw()
             self.session.write(key_bytes(event.key, event.character))
 
     def on_paste(self, event: events.Paste):
         event.stop()
         if self.session:
+            if self.session.screen.return_to_live():
+                self.mark_dirty()
+                self.redraw()
             self.session.write(b"\x1b[200~" + event.text.encode() + b"\x1b[201~")
 
     def on_click(self):
@@ -237,15 +330,17 @@ class NativeTerminal(Widget, can_focus=True):
 
     def on_mouse_scroll_up(self, event):
         event.stop()
-        if self.session:
-            self.session.screen.prev_page()
+        event.prevent_default()
+        if self.session and self.session.screen.scroll_history(-3):
             self.mark_dirty()
+            self.redraw()
 
     def on_mouse_scroll_down(self, event):
         event.stop()
-        if self.session:
-            self.session.screen.next_page()
+        event.prevent_default()
+        if self.session and self.session.screen.scroll_history(3):
             self.mark_dirty()
+            self.redraw()
 
 
 class CodexPane(Widget):
