@@ -57,6 +57,8 @@ def parser():
     pr.add_argument("--body-file", type=Path)
     svc = sub.add_parser("service", help="后台服务状态/关闭")
     svc.add_argument("action", choices=["status", "stop"])
+    trust = sub.add_parser("trust-worktrees", help="本机授权项目任务 worktree 加载 Codex 配置、钩子和规则")
+    trust.add_argument("action", choices=["enable", "disable", "status"])
     return p
 
 
@@ -90,6 +92,15 @@ def main(argv=None):
                   "codex": shutil.which(project.config.get("codex_command", ["codex"])[0]),
                   "base_exists": git(project.root, "rev-parse", "--verify", project.base_ref(), check=False).returncode == 0,
                   "service_running": online(project)})
+        elif args.command == "trust-worktrees":
+            from .trust import set_worktree_trust, worktree_trust_enabled
+            if args.action != "status":
+                set_worktree_trust(project, args.action == "enable")
+            emit({"root": str(project.root), "enabled": worktree_trust_enabled(project)})
+            if args.action == "enable":
+                print("已授权本项目的任务 worktree 加载 Codex 项目配置、钩子和规则；保留明确的 untrusted 选择。")
+            if args.action != "status":
+                print("下次连接会话时生效；已打开的面板请用 Ctrl+Q 退出后重开，无需停止后台服务。")
         elif args.command == "show":
             task = project.task(args.id)
             emit({"definition": task.definition, "folder": str(task.folder), **view(project, args.id)})

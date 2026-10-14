@@ -95,6 +95,25 @@ taskdeck service stop
 
 关闭后台服务会断开本项目的执行连接。只想离开面板时用 `Ctrl+Q`。
 
+## worktree 目录信任
+
+Codex 对各任务的独立 worktree 分别记录目录信任，主仓库已信任时，新任务仍可能出现「Trust and continue」。顶部「导入任务」旁的「目录信任：开/关」按钮显示本项目当前状态。点击后查看范围，再选择「开启自动信任」或「关闭自动信任」；也可以在项目内执行：
+
+```sh
+taskdeck trust-worktrees enable
+taskdeck trust-worktrees status
+# 撤销继承
+taskdeck trust-worktrees disable
+```
+
+默认关闭。开启代表允许这些 worktree 加载 Codex 项目配置、钩子和规则；记录仅保存在本机 Git 共享管理目录的 `taskdeck/trust-worktrees.json`，绑定项目路径和当前 `CODEX_HOME`，不随 clone 或项目配置传播。
+
+下次连接原生会话时，面板核对任务目录、Git 仓库和已登记的 worktree，通过 Codex 原生配置接口在当前 `CODEX_HOME/config.toml` 中仅登记该目录的 `projects.<path>.trust_level="trusted"`。写入前核对配置版本，避免覆盖并发修改。Codex 配置中明确标为 `untrusted` 的项目或 worktree 不会被覆盖；已有 `trusted` 设置沿用。不会修改沙箱或命令审批配置。参见 [OpenAI 官方目录信任配置](https://learn.chatgpt.com/docs/config-file/config-reference)。
+
+界面开关即时保存；如果当前会话正停在原生目录 Trust 提示上，开启后会重新连接这个终端客户端，保留原 thread 和后台任务。其他已连接会话保持原状，新连接会应用当前设置。在命令行切换后，面板会刷新按钮状态；已经停在 Trust 提示上的客户端可退出面板再重新连接，无需停止后台服务。
+
+关闭后停止自动登记；已经保存到 Codex 的目录信任仍保留，如需撤销可将对应目录改为 `untrusted`。钩子自己的授权提示仍由 Codex 处理。
+
 ## 依赖和 PR
 
 任务启动前刷新目标分支、检查依赖交付提交确实在基线中，再检查 worktree 是否包含这些提交。不会只凭状态文字或 PR 存在来解除依赖。已存在的 worktree 不会被重置；如果它落后于新依赖，需要先在该目录更新目标分支，再继续。
