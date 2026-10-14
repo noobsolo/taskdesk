@@ -2,7 +2,8 @@ from pathlib import Path
 
 from textual.widgets import Button, DataTable, Input, TabbedContent, TextArea
 
-from taskdeck.tui import CompletionModal, TaskDeck
+from taskdeck.tui import CompletionModal, TaskDeck, WorktreeTrustModal
+from taskdeck.trust import set_worktree_trust, worktree_trust_enabled
 
 
 async def test_mouse_keyboard_search_do_not_start_tasks(project):
@@ -92,6 +93,9 @@ async def test_native_tab_keeps_task_clients_and_owns_dashboard_shortcut_keys(pr
                 break
             await pilot.pause(0.05)
         first = pane.terminals["T001"]
+        await pane.reconnect_for_trust()
+        assert pane.terminals["T001"] is first
+        assert attached == ["T001"]
         assert isinstance(app.focused, NativeTerminal)
         await pilot.press("n", "s", "slash", "enter", "escape")
         await pilot.pause(0.15)
@@ -110,6 +114,109 @@ async def test_native_tab_keeps_task_clients_and_owns_dashboard_shortcut_keys(pr
         assert pane.terminals["T001"] is first
         assert first.display and first.session.proc.poll() is None
         assert sorted(attached) == ["T001", "T002"]
+        assert not project.socket.exists()
+
+
+async def test_trust_button_enable_cancel_disable_fits_empty_80_column_dashboard(project, monkeypatch):
+    monkeypatch.setenv("CODEX_HOME", str(project.root.parent / "codex-home"))
+    monkeypatch.setattr("taskdeck.tui.ensure_service", lambda _: (_ for _ in ()).throw(AssertionError("must not start Codex")))
+    app = TaskDeck(project)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        button = app.query_one("#trust-worktrees", Button)
+        assert str(button.label) == "目录信任：关"
+        assert button.region.x >= 0 and button.region.right <= 80
+        assert button.region.y >= 0 and button.region.bottom <= 24
+        await pilot.click("#trust-worktrees")
+        await pilot.pause()
+        assert isinstance(app.screen, WorktreeTrustModal)
+        for ident in ("trust-box", "confirm-trust", "cancel-trust"):
+            region = app.screen.query_one("#" + ident).region
+            assert region.x >= 0 and region.right <= 80
+            assert region.y >= 0 and region.bottom <= 24
+        await pilot.press("escape")
+        await pilot.pause()
+        assert not worktree_trust_enabled(project)
+        assert not (project.runtime / "trust-worktrees.json").exists()
+        await pilot.click("#trust-worktrees")
+        await pilot.pause()
+        await pilot.click("#confirm-trust")
+        await app.workers.wait_for_complete()
+        assert worktree_trust_enabled(project)
+        assert str(button.label) == "目录信任：开"
+        assert button.variant == "success"
+        await pilot.click("#trust-worktrees")
+        await pilot.pause()
+        assert str(app.screen.query_one("#confirm-trust", Button).label) == "关闭自动信任"
+        await pilot.click("#confirm-trust")
+        await app.workers.wait_for_complete()
+        assert not worktree_trust_enabled(project)
+        assert str(button.label) == "目录信任：关"
+        assert not project.socket.exists()
+        assert project.scan() == {}
+
+
+async def test_trust_button_shows_persisted_state_and_refreshes_external_changes(project, monkeypatch):
+    monkeypatch.setenv("CODEX_HOME", str(project.root.parent / "codex-home"))
+    task = project.add("T001", "未开始的任务")
+    set_worktree_trust(project, True)
+    app = TaskDeck(project)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        button = app.query_one("#trust-worktrees", Button)
+        assert str(button.label) == "目录信任：开"
+        set_worktree_trust(project, False)
+        await app.reload()
+        assert str(button.label) == "目录信任：关"
+        assert not task.local.exists()
+        assert not project.socket.exists()
+
+
+async def test_trust_ui_preserves_off_state_when_project_is_explicitly_untrusted(project, monkeypatch):
+    import json
+    home = project.root.parent / "codex-home"
+    home.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    (home / "config.toml").write_text(f'[projects.{json.dumps(str(project.root))}]\ntrust_level="untrusted"\n')
+    app = TaskDeck(project)
+    messages = []
+    monkeypatch.setattr(app, "notify", lambda message, **kwargs: messages.append(str(message)))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        await pilot.click("#trust-worktrees")
+        await pilot.pause()
+        await pilot.click("#confirm-trust")
+        await app.workers.wait_for_complete()
+        assert any("untrusted" in message for message in messages)
+        assert not worktree_trust_enabled(project)
+        button = app.query_one("#trust-worktrees", Button)
+        assert str(button.label) == "目录信任：关" and not button.disabled
+        assert not project.socket.exists()
+
+
+async def test_trust_dialog_can_open_during_background_refresh(project, monkeypatch):
+    import asyncio
+    import threading
+    from taskdeck.service import snapshot
+    entered, release = threading.Event(), threading.Event()
+    app = TaskDeck(project)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        def delayed_snapshot(project):
+            entered.set()
+            assert release.wait(5)
+            return snapshot(project)
+        monkeypatch.setattr("taskdeck.tui.snapshot", delayed_snapshot)
+        refresh = asyncio.create_task(app.reload())
+        try:
+            assert await asyncio.to_thread(entered.wait, 2)
+            await pilot.click("#trust-worktrees")
+            await pilot.pause()
+            assert isinstance(app.screen, WorktreeTrustModal)
+        finally:
+            release.set()
+            await refresh
+        assert isinstance(app.screen, WorktreeTrustModal)
         assert not project.socket.exists()
 
 

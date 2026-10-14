@@ -102,3 +102,32 @@
 - Reviewed actual updated CLI screenshots at `/private/tmp/taskdeck-scroll-final/chinese-input.svg.png`, `slash-menu.svg.png`, `resized.svg.png` and `scroll-up.svg.png`: CJK text, native menu highlighting, cursor, status columns, footer and resized content stay inside the existing pane.
 - Full suite with host permissions for the temporary Unix socket: `.venv/bin/python -m pytest -q` — 54 passed in 18.10s. Coverage includes real PTY ongoing output/cursor reports while browsing, key/paste return to live, history bounds/eviction, resize, split UTF-8, bounded read callbacks, hidden tab restoration and existing task/service/PR behavior. `git diff --check` passed.
 - Only the dashboard needs `Ctrl+Q` and `taskdeck` to load this update. No user project service was restarted and no user task was started or interrupted. Physical scrolling in the user's already-running dashboard still requires reloading that process.
+
+## Project worktree trust — 2026-10-14
+
+- Added `taskdeck trust-worktrees enable|disable|status`, off by default. The opt-in is local to the Git common directory and bound to project identity/root and current `CODEX_HOME`; a checked-in project setting cannot enable it. Only registered worktrees at the task's recorded managed path, belonging to the same Git repository, qualify.
+- Real Codex 0.162.1 verification found that a CLI `-c projects.<path>.trust_level="trusted"` override does not skip folder onboarding with `resume --remote`. The implementation instead uses the running server's `config/read` and `config/value/write` API, writing only that worktree's trust key with the user config layer's `expectedVersion`. It checks explicit untrusted settings and repeats the local authorization/path check before writing. It refuses mismatched server config directories and endpoints.
+- Full suite: `.venv/bin/python -m pytest -q` — 71 passed in 20.79s with host permissions for temporary Unix sockets. The 17 new checks cover local opt-in, quoted/CJK paths, enable/status/disable without model work, redirected/foreign/moved worktrees, project/Codex-home changes, explicit distrust, malformed config, config-version conflict, missing version, mismatched config directory/endpoint, and disabling during a config read. `git diff --check` passed.
+- Final real CLI command: `.venv/bin/python docs/check_worktree_trust.py /private/tmp/taskdeck-trust-check-final`. Uses a temporary Git project, separate credential-free `CODEX_HOME`, and an unreachable local provider; no real user account configuration is modified. Output contains six native-tab screenshots, local `/status` screenshots/text, and `result.json`.
+
+  | Case | Native CLI result | Saved trust |
+  | --- | --- | --- |
+  | Default disabled | Folder trust prompt | No worktree entry |
+  | Enabled | Connected directly | Only selected worktree becomes trusted |
+  | Enabled, dashboard reopened | Connected directly | Existing trusted entry retained |
+  | Explicit untrusted | Connected under Codex's existing untrusted decision | Untrusted preserved |
+  | Disabled, previously trusted worktree | Connected directly | Saved trust retained |
+  | Disabled, new worktree | Folder trust prompt | No new entry |
+
+- Codex treats an explicit untrusted entry as a completed folder choice, so preserving untrusted does not necessarily produce another trust prompt. The probe asserts that it is not converted to trusted. Every connected `/status` displays `Read Only (Ask for approval)`, and all unrelated configuration values remain unchanged.
+- All six checks keep the same app-server process and preserve each task's original thread. Two empty test threads contain zero model turns and are archived on cleanup. The feature needs only a dashboard reload; no running user project service or task was restarted/interrupted. It has not been enabled for the user's projects automatically. Disabling stops new automatic registrations and retains already-saved Codex trust entries, as documented.
+
+## Worktree trust button — 2026-10-14
+
+- Added a project-wide `目录信任：开/关` button beside Import in the top filter row. The dialog displays project scope/current state and offers Enable/Disable plus Back/Escape. It writes the same local opt-in as the CLI; periodic refresh also reflects external CLI changes. The four task action buttons remain in their original bottom row.
+- Enabling from the UI reconnects only the selected, visible native client that is still at the live folder-trust prompt. Connected clients, menus and unsent drafts are retained. The live buffer is inspected so an old prompt in scrollback cannot trigger a reconnect. Disabling stops new registrations and leaves already-connected clients and saved Codex trust intact.
+- Real CLI probe updated to use the UI buttons: `.venv/bin/python docs/check_worktree_trust.py /private/tmp/taskdeck-trust-ui-final` — all six scenarios passed. Enabling replaces the waiting PTY client and connects directly; disabling retains the existing client. Same server process and original threads throughout, zero model turns, explicit untrusted and unrelated configuration preserved, and every connected `/status` remains `Read Only (Ask for approval)`.
+- The real probe exposed a refresh/teardown race: the dashboard or modal can change while the snapshot thread is running. Reload now rechecks the screen and mounted controls after the await. A deterministic regression opens the trust dialog during an in-flight refresh; the final live probe also exits all six dashboards without errors.
+- Full suite: `.venv/bin/python -m pytest -q` — 75 passed in 25.68s with host permissions for temporary sockets. Four new UI checks cover 80×24 empty-dashboard/button/dialog bounds, cancellation, enable/disable persistence without starting tasks, initial/external state, rejection of an explicitly untrusted project, and concurrent modal/refresh behavior. Existing native-client retention and bottom-action layout checks also pass. `git diff --check` passed.
+- Regenerated `docs/taskdeck.svg` and `docs/taskdeck.png` from the actual 140×42 demo dashboard. Visually inspected the wide dashboard, 80×24 dashboard and trust dialog rendered by Quick Look; new controls fit the existing layout. Preview tasks are isolated and no model work is started.
+- The user's k12 opt-in remains enabled. Only a dashboard reload is needed to show the new button; its project service and running tasks were not restarted or interrupted.

@@ -24,6 +24,7 @@ from textual.widgets import Static
 
 from .core import DeckError
 from .service import ensure_service, rpc
+from .trust import inherit_worktree_trust
 
 
 def key_bytes(key, character=None):
@@ -359,6 +360,22 @@ class CodexPane(Widget):
     def compose(self):
         yield Static("", id="codex-connection", markup=False)
 
+    async def reconnect_for_trust(self):
+        ident = self.ident
+        terminal = self.terminals.get(ident)
+        if not terminal or not terminal.session or not terminal.is_on_screen:
+            return
+        screen = terminal.session.screen
+        # Inspect the live screen, even when scrollback is visible. Never
+        # replace a connected client with an unsent draft or an active menu.
+        text = "\n".join("".join(screen.buffer[y][x].data for x in range(screen.columns))
+                         for y in range(screen.lines))
+        if "Trust this folder?" not in text or "Ask Codex to do anything" in text:
+            return
+        await terminal.remove()
+        self.terminals.pop(ident, None)
+        await self.select_task(ident)
+
     async def select_task(self, ident):
         if not ident or not self.project.task(ident).state.get("thread_id"):
             return
@@ -384,6 +401,7 @@ class CodexPane(Widget):
             message.update("正在连接 Codex…")
             await asyncio.to_thread(ensure_service, self.project)
             connection = await asyncio.to_thread(rpc, self.project, {"op": "attach", "task": ident})
+            await inherit_worktree_trust(self.project, self.project.task(ident), connection)
             terminal = NativeTerminal(connection["command"], connection["cwd"])
             # Child Python must still find this installed editable package when
             # the PTY changes cwd to the task's worktree.

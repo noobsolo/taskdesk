@@ -15,6 +15,7 @@ from .core import DeckError, LABELS, Project
 from .service import ensure_service, rpc, snapshot
 from .terminal import CodexPane, NativeTerminal
 from .importer import detect_source, import_markdown, legacy_files
+from .trust import set_worktree_trust, worktree_trust_enabled
 
 
 class CompletionModal(ModalScreen):
@@ -44,6 +45,38 @@ class CompletionModal(ModalScreen):
         self.dismiss(self.query_one("#completion-commit", Input).value.strip() if event.button.id == "confirm-completion" else None)
 
 
+class WorktreeTrustModal(ModalScreen):
+    CSS = """
+    WorktreeTrustModal { align: center middle; }
+    #trust-box { width: 90%; max-width: 90; height: auto; padding: 1 2; border: round #6caea3; background: #172026; }
+    #trust-box Static { height: auto; margin: 1 0; }
+    #trust-buttons { height: 3; }
+    #trust-buttons Button { width: 1fr; min-width: 12; }
+    """
+    BINDINGS = [("escape", "dismiss(None)", "返回")]
+
+    def __init__(self, project, enabled):
+        super().__init__()
+        self.project, self.enabled = project, enabled
+
+    def compose(self):
+        with Vertical(id="trust-box"):
+            yield Label("任务目录信任")
+            yield Static(f"项目：{self.project.root}\n当前状态：{'已开启' if self.enabled else '已关闭'}\n\n"
+                         "开启后，本项目任务目录可加载 Codex 配置、钩子和规则，连接时自动登记目录信任。"
+                         "明确标为不信任的目录仍保留原选择。\n\n"
+                         "关闭后停止自动登记，已保存的目录信任仍保留。沙箱和命令审批配置不变。", markup=False)
+            with Horizontal(id="trust-buttons"):
+                yield Button("关闭自动信任" if self.enabled else "开启自动信任", id="confirm-trust",
+                             variant="warning" if self.enabled else "success")
+                yield Button("返回", id="cancel-trust")
+
+    @on(Button.Pressed)
+    def respond(self, event):
+        event.stop()
+        self.dismiss(not self.enabled if event.button.id == "confirm-trust" else None)
+
+
 class TaskDeck(App):
     TITLE = "taskdeck"
     ENABLE_COMMAND_PALETTE = False
@@ -55,6 +88,7 @@ class TaskDeck(App):
     #search { width: 1fr; }
     #filter { width: 22; }
     #import { min-width: 12; }
+    #trust-worktrees { width: 18; min-width: 18; }
     #main { height: 1fr; }
     #tasks { width: 45%; border: round #34454e; }
     #detail-pane { width: 55%; padding: 0 1; }
@@ -79,6 +113,7 @@ class TaskDeck(App):
         self.refreshing = False
         self.rendering = False
         self.import_source = detect_source(project)
+        self.trust_enabled = None
 
     def compose(self):
         yield Header()
@@ -88,6 +123,7 @@ class TaskDeck(App):
             yield Select([("全部任务", "all"), ("可开始", "ready"), ("运行中", "running"),
                           ("等你处理", "waiting"), ("待核对", "unverified"), ("待入基线", "delivered"), ("被阻塞", "blocked"), ("有 PR", "pr")], value="all", allow_blank=False, id="filter")
             yield Button("导入任务", id="import")
+            yield Button("目录信任…", id="trust-worktrees")
         with Horizontal(id="main"):
             yield DataTable(id="tasks", cursor_type="row", zebra_stripes=True)
             with Vertical(id="detail-pane"):
@@ -125,6 +161,10 @@ class TaskDeck(App):
         self.refreshing = True
         try:
             data = await asyncio.to_thread(snapshot, self.project)
+            # A modal can open, or the dashboard can unmount, while the
+            # snapshot thread runs. Don't query controls on that new screen.
+            if self.screen is not self.screen_stack[0] or not self.screen.query("#summary"):
+                return
             self.rows = data["tasks"]
             counts = {s: sum(r["status"] == s for r in self.rows) for s in ("ready", "running", "waiting", "done")}
             counts["running"] = sum(r.get("execution_status") in {"running", "preparing"} for r in self.rows)
@@ -132,10 +172,52 @@ class TaskDeck(App):
             summary = f"{self.project.root.name}  /  {self.project.base}     {len(self.rows)} 个任务 · 可开始 {counts['ready']} · 运行 {counts['running']} · 等你 {counts['waiting']} · 完成 {counts['done']}"
             self.query_one("#summary", Static).update(summary)
             self.draw_table()
+            await self.refresh_trust_button()
         except DeckError as e:
             self.query_one("#notice", Static).update(str(e))
         finally:
             self.refreshing = False
+
+    async def refresh_trust_button(self):
+        button = self.query_one("#trust-worktrees", Button)
+        try:
+            enabled = await asyncio.to_thread(worktree_trust_enabled, self.project)
+        except DeckError:
+            button.label = "目录信任：异常"
+            button.variant = "error"
+            self.trust_enabled = None
+            raise
+        if enabled != self.trust_enabled:
+            button.label = "目录信任：开" if enabled else "目录信任：关"
+            button.variant = "success" if enabled else "default"
+            button.tooltip = "本项目任务目录的自动信任。点击查看范围并开启或关闭。"
+            self.trust_enabled = enabled
+
+    @work(exclusive=True, group="trust-setting")
+    async def configure_worktree_trust(self):
+        try:
+            await self.refresh_trust_button()
+            self.push_screen(WorktreeTrustModal(self.project, self.trust_enabled), self.change_worktree_trust)
+        except DeckError as e:
+            self.notify(str(e), severity="error", timeout=10)
+
+    @work(exclusive=True, group="trust-setting")
+    async def change_worktree_trust(self, enabled):
+        if enabled is None:
+            return
+        button = self.query_one("#trust-worktrees", Button)
+        button.disabled = True
+        try:
+            await asyncio.to_thread(set_worktree_trust, self.project, enabled)
+            await self.refresh_trust_button()
+            self.notify("已开启目录信任，下次连接会话时自动登记。" if enabled else
+                        "已关闭自动信任；已保存的目录信任仍保留。", timeout=8)
+            if enabled:
+                await self.query_one("#codex-pane", CodexPane).reconnect_for_trust()
+        except (DeckError, OSError) as e:
+            self.notify(str(e), severity="error", timeout=10)
+        finally:
+            button.disabled = False
 
     def draw_table(self):
         query = self.query_one("#search", Input).value.casefold()
@@ -346,7 +428,8 @@ class TaskDeck(App):
     @on(Button.Pressed)
     def buttons(self, event):
         mapping = {"start": self.action_start, "sync": self.action_sync,
-                   "import": self.import_tasks, "complete": self.confirm_completion}
+                   "import": self.import_tasks, "complete": self.confirm_completion,
+                   "trust-worktrees": self.configure_worktree_trust}
         if event.button.id in mapping:
             mapping[event.button.id]()
         elif event.button.id == "open-pr" and self.selected:
